@@ -220,7 +220,9 @@ def apply_plausibility(df: pd.DataFrame, rules: Dict[str, Tuple[Optional[float],
     for col, (lo, hi) in rules.items():
         if col not in df.columns:
             raise ConfigError([f"PLAUSIBILITY: column {col!r} not found."])
-        x = pd.to_numeric(df[col], errors="coerce")
+        # .copy(): without copy-on-write (pandas < 3), to_numeric can return a view,
+        # and the replacement below would rewrite the values we report.
+        x = pd.to_numeric(df[col], errors="coerce").copy()
         below = (x < lo) if lo is not None else pd.Series(False, index=df.index)
         above = (x > hi) if hi is not None else pd.Series(False, index=df.index)
         bad = (below | above).fillna(False)
