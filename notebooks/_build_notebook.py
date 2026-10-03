@@ -88,6 +88,7 @@ md("""
 | `PDO`, `BASE_SCORE`, `BASE_ODDS`, `BASE_POINTS` | Scorecard scaling: `BASE_SCORE` points at `BASE_ODDS`:1 good:bad odds, `PDO` points to double the odds. `BASE_POINTS`: `"spread"` over variables or `"separate"` row. |
 | `GOOD_CLASS` | Which target value is *good* (0 by default: target 1 is the bad / event). A higher score always means a higher probability of good. |
 | `COST_OF_BAD`, `BENEFIT_OF_GOOD` | Economics for the cutoff (section 8): average credit loss on a loan that goes bad, average margin on a loan that pays. |
+| `ALIGN_DATASETS` | Other tables with the same raw columns to analyse in the alignment app (same source options as `DATA_SOURCE`). The app's *Dataset* and *Target* selectors switch between them and any 0/1 column. |
 
 **Switching to your own data:** change `DATA_SOURCE` and `TARGET`, and empty `EXCLUDE`, `FORCE_INCLUDE` and `PLAUSIBILITY` (they name the demo's columns). A name that isn't in your data stops the run with a *did you mean* suggestion.
 """)
@@ -145,6 +146,7 @@ GOOD_CLASS = 0          # target value that means good (0: target 1 = bad / even
 # ── Alignment (section 8) ───────────────────────────────────────────────
 COST_OF_BAD = 1000      # average credit loss on a loan that goes bad
 BENEFIT_OF_GOOD = 100   # average margin on a loan that pays
+ALIGN_DATASETS = {}     # extra tables to analyse in the app, e.g. {"2025 vintage": "drive:data/apps_2025.csv"}
 
 # ── Outputs ─────────────────────────────────────────────────────────────
 OUTPUT_DIR = "/content/drive/MyDrive/scorecard_studio"
@@ -470,7 +472,9 @@ display(pd.concat([new_df, rescored], axis=1).head())
 md("""
 ## 8. Scorecard alignment
 
-**What it does:** opens the alignment app on the scorecard from section 6 and every scored row. The settings on the left start from the config cell and can be changed in the app: good class, sample used to set the cutoff, PDO / base score / base odds, base points, cost of a bad, benefit of a good.
+**What it does:** opens the alignment app on the scorecard from section 6 and every scored row. The settings on the left start from the config cell and can be changed in the app: dataset (the model dataset, or any table in `ALIGN_DATASETS`), target (any 0/1 column, e.g. another default definition), good class, sample used to set the cutoff, PDO / base score / base odds, base points, cost of a bad, benefit of a good.
+
+Switching dataset or target never changes the scorecard: the same bins and points are applied, and only the outcomes you measure them against change. That's how you check a cutoff on a newer vintage, or how the score ranks a 24-month default flag it wasn't built on. Rows with an unknown outcome (e.g. rejects in a through-the-door file) count in the approval rate but not in bad rates or profit.
 
 | Tab | What you do there |
 |---|---|
@@ -490,9 +494,10 @@ md("""
 Every change is saved to `08_alignment/alignment_state.json` and reloaded after a runtime reset.
 """)
 code("""
+extra = {name: ss.load_table(src)[0] for name, src in ALIGN_DATASETS.items()}
 align = launch_alignment(card, df, cfg.target, store=store, sample=sample, id_col=ID,
                          cost_bad=COST_OF_BAD, benefit_good=BENEFIT_OF_GOOD,
-                         dataset_name=intake.source)
+                         dataset_name="model dataset", datasets=extra)
 """)
 md("""
 ### Final table and scoring code

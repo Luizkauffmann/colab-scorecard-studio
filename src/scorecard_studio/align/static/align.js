@@ -59,6 +59,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('codeLang').onchange = () => { $('codeTable').style.display = $('codeLang').value.startsWith('sql') ? '' : 'none'; previewCode(); };
   $('codeTable').style.display = 'none';
   $('gainsSample').onchange = () => loadStats($('gainsSample').value);
+  $('dataSel').onchange = () => switchData($('dataSel').value, null);
+  $('targetSel').onchange = () => switchData(null, $('targetSel').value);
   try {
     const r = await api('api/state');
     apply(r);
@@ -87,6 +89,11 @@ function switchTab(t) {
 // ── Sidebar ──────────────────────────────────────────────────────────
 function fillSettings() {
   const s = S.state;
+  $('dataSel').innerHTML = (s.datasets || [s.dataset]).map((x) => '<option value="' + esc(x) + '">' + esc(x) + '</option>').join('');
+  $('dataSel').value = s.dataset;
+  const opts = (s.target_options || []).includes(s.target) ? s.target_options : [s.target].concat(s.target_options || []);
+  $('targetSel').innerHTML = opts.map((x) => '<option value="' + esc(x) + '">' + esc(x) + '</option>').join('');
+  $('targetSel').value = s.target;
   $('goodClass').value = String(s.good_class);
   $('stratSample').innerHTML = s.samples.concat(s.samples.length > 1 ? ['all'] : [])
     .map((x) => '<option value="' + esc(x) + '">' + esc(x) + (x === 'train' ? ' (in-sample)' : '') + '</option>').join('');
@@ -99,10 +106,22 @@ function fillSettings() {
 function renderSidebar() {
   const s = S.state; if (!s) return;
   $('dsInfo').innerHTML = (s.dataset ? '<b>' + esc(s.dataset) + '</b><br>' : '') +
-    'Target <b>' + esc(s.target) + '</b> · ' + num(s.rows) + ' rows<br>' + s.variables.length + ' variables · samples: ' + esc(s.samples.join(', '));
+    'Target <b>' + esc(s.target) + '</b> · ' + num(s.rows) + ' rows' +
+    (s.outcome_rows < s.rows ? ' (' + num(s.outcome_rows) + ' with an outcome)' : '') + '<br>' + s.variables.length + ' variables · samples: ' + esc(s.samples.join(', '));
   $('scaleInfo').innerHTML = 'Factor ' + Number(s.factor).toFixed(4) + ' · Offset ' + Number(s.offset).toFixed(4) +
     '<br>Score = Offset + Factor · ln(odds good:bad)';
   if (s.last_saved) { $('saveStatus').textContent = 'Saved to Drive at ' + s.last_saved; $('saveStatus').className = 'save-status ok'; }
+}
+
+function switchData(dataset, target) {
+  run('Scoring ' + (dataset || S.state.dataset) + '…', async () => {
+    const r = await api('api/data', { dataset: dataset, target: target });
+    apply(r);
+    fillSettings();
+    if (S.tab === 'scorecard') loadScorecard();
+    if (S.tab === 'stats') loadStats();
+    toast('Now using ' + r.state.dataset + ' with target ' + r.state.target + '.');
+  }).then(() => fillSettings());
 }
 
 function applySettings() {

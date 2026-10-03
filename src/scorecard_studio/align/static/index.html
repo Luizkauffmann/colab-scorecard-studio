@@ -23,7 +23,12 @@
       <div id="dsInfo" class="ds-info"></div>
     </div>
     <div class="sidebar-body">
-      <div class="section-label">Target and sample</div>
+      <div class="section-label">Data and target</div>
+      <label for="dataSel">Dataset</label>
+      <select id="dataSel"></select>
+      <label for="targetSel">Target</label>
+      <select id="targetSel"></select>
+      <div class="hint">Any 0/1 column of the dataset (e.g. another default definition). Rows with an unknown outcome count in the approval rate only.</div>
       <label for="goodClass">Which target value is good?</label>
       <select id="goodClass">
         <option value="0">0 is good (1 = bad / event)</option>

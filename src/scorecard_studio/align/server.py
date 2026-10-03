@@ -46,6 +46,12 @@ def create_align_app(session: AlignSession) -> Flask:
     def state():
         return ok(everything())
 
+    @app.post("/api/data")
+    def data():
+        b = body()
+        session.set_data(b.get("dataset") or None, b.get("target") or None)
+        return ok(everything())
+
     @app.post("/api/settings")
     def settings():
         session.set_settings(**body())

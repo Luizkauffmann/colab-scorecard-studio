@@ -226,3 +226,59 @@ def test_routes(built, tmp_path):
     assert c.get("/api/code?lang=cobol").status_code == 400
     assert c.post("/api/settings", json={"pdo": -5}).status_code == 400
     assert c.post("/api/points", json={"variable": "nope", "group": 1, "points": 1}).status_code == 400
+
+
+# ── dataset and target chosen in the app ─────────────────────────────
+
+def test_switch_dataset_and_target(built, tmp_path):
+    card, it, sample = built
+    rng = np.random.default_rng(7)
+    other = make_credit_risk_like(n=1500, seed=77)               # raw table, same schema
+    other["default_24m"] = np.where(rng.random(len(other)) < 0.8, other["loan_status"], 1 - other["loan_status"])
+    other.loc[other.index[:200], "default_24m"] = np.nan          # unknown outcomes (e.g. rejects)
+    a = AlignSession(card, it.df, "loan_status", sample=sample, id_col=it.id_col,
+                     save_dir=str(tmp_path / "08_alignment"), datasets={"new vintage": other})
+    st = a.state()
+    assert st["datasets"] == ["model dataset", "new vintage"] and st["dataset"] == "model dataset"
+    assert "loan_status" in st["target_options"]
+
+    points_before = a.card.points["Points"].tolist()
+    a.set_data("new vintage")                                   # target kept: loan_status exists there
+    assert a.target == "loan_status" and a.samples == ["all"] and len(a.score) == len(other)
+    np.testing.assert_allclose(a.score, card.score(other)["score"])     # same scorecard, raw data scored
+    assert a.card.points["Points"].tolist() == points_before
+
+    assert set(a.state()["target_options"]) >= {"loan_status", "default_24m"}
+    a.set_data(target="default_24m")
+    k = a.strategy()["kpis"]
+    assert k["rows"] == len(other)                               # approval rate on all rows
+    known = other["default_24m"].notna()
+    assert a.state()["outcome_rows"] == int(known.sum())
+
+    with pytest.raises(AlignError, match="0/1"):
+        a.set_data(target="person_income")
+    assert a.target == "default_24m"                             # unchanged after a refused switch
+    with pytest.raises(AlignError, match="Unknown dataset"):
+        a.set_data("nope")
+
+    table = a.final_table()
+    assert len(table) == len(other) and "default_24m" in table
+
+    # the choice is saved and restored with the rest of the state
+    saved = json.loads((tmp_path / "08_alignment" / "alignment_state.json").read_text())
+    assert saved["data"] == {"dataset": "new vintage", "target": "default_24m"}
+    b = AlignSession(card, it.df, "loan_status", sample=sample, id_col=it.id_col,
+                     datasets={"new vintage": other})
+    b.load(saved)
+    assert (b.dataset_name, b.target) == ("new vintage", "default_24m")
+
+
+def test_data_route(built, tmp_path):
+    card, it, sample = built
+    other = make_credit_risk_like(n=800, seed=78)
+    a = AlignSession(card, it.df, "loan_status", sample=sample, id_col=it.id_col, datasets={"other": other})
+    c = create_align_app(a).test_client()
+    r = c.post("/api/data", json={"dataset": "other"}).get_json()
+    assert r["state"]["dataset"] == "other" and r["strategy"]["kpis"]["rows"] == len(other)
+    bad = c.post("/api/data", json={"target": "person_age"})
+    assert bad.status_code == 400 and "0/1" in bad.get_json()["error"]

@@ -53,35 +53,102 @@ class AlignError(ValueError):
 
 
 class AlignSession:
+    """``data`` is the scored dataset (``dataset_name``); ``datasets`` adds
+    other tables with the same raw columns (``{name: df}`` or
+    ``{name: (df, sample)}``) that the app can switch to, e.g. a newer vintage
+    or a through-the-door file. Any 0/1 column of the chosen table can be the
+    target (e.g. an alternative default definition)."""
+
     def __init__(self, card: Scorecard, data: pd.DataFrame, target: str, *,
                  sample: Optional[pd.Series] = None, id_col: Optional[str] = None,
                  save_dir: Optional[str] = None, cost_bad: float = 1000.0, benefit_good: float = 100.0,
-                 strategy_sample: Optional[str] = None, dataset_name: str = ""):
-        if target not in data.columns:
-            raise AlignError(f"Target '{target}' not in the data.")
+                 strategy_sample: Optional[str] = None, dataset_name: str = "model dataset",
+                 datasets: Optional[Dict[str, Any]] = None):
         self.card = card.copy()
-        self.data = data
-        self.target = target
         self.id_col = id_col
+        self.save_dir = save_dir
+        self.lock = threading.RLock()
+        name = dataset_name or "model dataset"
+        self.datasets: Dict[str, Any] = {name: (data, sample)}
+        for k, v in (datasets or {}).items():
+            df, smp = v if isinstance(v, tuple) else (v, None)
+            if smp is None and "sample" in df.columns:
+                smp = df["sample"]
+            self.datasets[str(k)] = (df, smp)
+        self.settings: Dict[str, Any] = {
+            "cost_bad": float(cost_bad), "benefit_good": float(benefit_good),
+            "strategy_sample": strategy_sample, "mode": "profit", "value": None,
+        }
+        self.last_saved: Optional[str] = None
+        self.final: Optional[Dict[str, Any]] = None
+        self._use(name, target)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Dataset and target
+    # ══════════════════════════════════════════════════════════════════
+
+    def _use(self, name: str, target: str) -> None:
+        if name not in self.datasets:
+            raise AlignError(f"Unknown dataset '{name}'.")
+        data, sample = self.datasets[name]
+        if target not in data.columns:
+            raise AlignError(f"Target '{target}' is not a column of '{name}'.")
+        y = _binary_or_none(data[target])
+        if y is None:
+            raise AlignError(f"'{target}' is not a 0/1 column (missing values allowed for unknown outcomes).")
+        try:
+            groups = self.card.bin_groups(data)            # bins never change in this app
+        except (KeyError, ValueError) as exc:
+            raise AlignError(f"'{name}' can't be scored: {exc}") from exc
+        self.data, self.dataset_name, self.target = data, name, target
         self.sample = (sample.astype(str).reindex(data.index) if sample is not None
                        else pd.Series("all", index=data.index))
-        self.save_dir = save_dir
-        self.dataset_name = dataset_name
-        self.lock = threading.RLock()
-        self.groups = self.card.bin_groups(data)          # bins never change in this app
-        self.y = data[target].to_numpy()
+        self.groups, self.y = groups, y
         samples = [s for s in ("train", "test", "oot") if (self.sample == s).any()]
         samples += sorted(set(self.sample) - set(samples))
         self.samples = samples
         default = "oot" if "oot" in samples else "test" if "test" in samples else samples[0]
-        self.settings: Dict[str, Any] = {
-            "cost_bad": float(cost_bad), "benefit_good": float(benefit_good),
-            "strategy_sample": strategy_sample if strategy_sample in samples else default,
-            "mode": "profit", "value": None,
-        }
-        self.last_saved: Optional[str] = None
-        self.final: Optional[Dict[str, Any]] = None
+        if self.settings.get("strategy_sample") not in samples + ["all"]:
+            self.settings["strategy_sample"] = default
+        self.final = None
         self._recompute()
+
+    def target_options(self, name: Optional[str] = None) -> List[str]:
+        """0/1 columns of a dataset that can serve as the target."""
+        data = self.datasets[name or self.dataset_name][0]
+        out = []
+        for c in data.columns:
+            if c in self.card.variables or c == self.id_col or c == "sample":
+                continue
+            s = data[c]
+            if s.notna().sum() == 0 or s.dropna().nunique() != 2:
+                continue
+            if _binary_or_none(s) is not None:
+                out.append(c)
+        return out
+
+    def set_data(self, dataset: Optional[str] = None, target: Optional[str] = None) -> None:
+        """Switch to another dataset and/or target; the scorecard and its
+        overrides stay as they are."""
+        with self.lock:
+            name = dataset or self.dataset_name
+            if name not in self.datasets:
+                raise AlignError(f"Unknown dataset '{name}'.")
+            tgt = target or (self.target if self.target in self.datasets.get(name, (pd.DataFrame(),))[0]
+                             else None)
+            if tgt is None:
+                opts = self.target_options(name) if name in self.datasets else []
+                if not opts:
+                    raise AlignError(f"'{name}' has no 0/1 column to use as the target.")
+                tgt = opts[0]
+            old = (self.dataset_name, self.target)
+            try:
+                self._use(name, tgt)
+                self.strategy()
+            except AlignError:
+                self._use(*old)
+                raise
+            self.save()
 
     # ══════════════════════════════════════════════════════════════════
     # Scores
@@ -279,6 +346,8 @@ class AlignSession:
         sc = self.card.scaling
         return {
             "dataset": self.dataset_name, "target": self.target, "rows": int(len(self.score)),
+            "datasets": list(self.datasets), "target_options": self.target_options(),
+            "outcome_rows": int(np.sum(~np.isnan(self.y))),
             "samples": self.samples, "good_class": self.card.good_class,
             "pdo": sc.pdo, "base_score": sc.base_score, "base_odds": sc.base_odds,
             "factor": sc.factor, "offset": sc.offset, "base_points": self.card.base_points_mode,
@@ -291,12 +360,13 @@ class AlignSession:
         p = self.card.points
         key = json.dumps({"intercept": round(self.card.intercept, 10),
                           "coef": [round(float(c), 10) for c in p["Coefficient"].fillna(0)],
-                          "rows": int(len(self.score))})
+                          "variables": list(self.card.variables)})
         return _stable_hash(key)
 
     def to_state(self) -> Dict[str, Any]:
         return {"saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "signature": self.signature(), "settings": self.settings,
+                "data": {"dataset": self.dataset_name, "target": self.target},
                 "scorecard": self.card.to_dict()}
 
     def save(self) -> Optional[str]:
@@ -320,6 +390,14 @@ class AlignSession:
             card = Scorecard.from_dict(state["scorecard"])
             self.card = card
             self.settings.update(state.get("settings") or {})
+            d = state.get("data") or {}
+            try:
+                if d.get("dataset") in self.datasets:
+                    self._use(d["dataset"], d.get("target") or self.target)
+            except AlignError:
+                pass
+            if self.settings.get("strategy_sample") not in self.samples + ["all"]:
+                self.settings["strategy_sample"] = self.samples[0]
             self._recompute()
 
     def finalize(self) -> Dict[str, Any]:
@@ -386,6 +464,18 @@ class AlignSession:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         return path
+
+
+def _binary_or_none(s: pd.Series) -> Optional[np.ndarray]:
+    """0/1 as float with NaN for unknown outcomes, or None if not binary."""
+    from ..intake import _as_binary
+    known = s.notna()
+    b = _as_binary(s[known]) if known.any() else None
+    if b is None:
+        return None
+    out = np.full(len(s), np.nan)
+    out[known.to_numpy()] = b.to_numpy(dtype=float)
+    return out
 
 
 def _stable_hash(text: str) -> str:

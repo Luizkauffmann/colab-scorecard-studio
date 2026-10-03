@@ -69,9 +69,11 @@ def launch_alignment(card: Scorecard, data: pd.DataFrame, target: str, *, store=
                      show: bool = True, port: Optional[int] = None, height: int = 900,
                      **session_kwargs) -> AlignApp:
     """Open the alignment app on ``card`` and ``data`` (rows with the raw
-    variables, the target and, via ``sample=``, their sample). With ``store``,
-    state is saved to ``08_alignment/`` and the newest state saved for the same
-    model in any earlier run is reloaded."""
+    variables, the target and, via ``sample=``, their sample). ``datasets=``
+    adds other tables the app can switch to (``{name: df}``); any 0/1 column
+    can be picked as the target. With ``store``, state is saved to
+    ``08_alignment/`` and the newest state saved for the same model in any
+    earlier run is reloaded."""
     if store is not None:
         session_kwargs.setdefault("save_dir", store.folder("alignment"))
     session = AlignSession(card, data, target, **session_kwargs)
