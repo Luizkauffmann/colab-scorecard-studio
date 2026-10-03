@@ -24,6 +24,7 @@ STAGES = {
     "model": "05_model",
     "scorecard": "06_scorecard",
     "rescore": "07_rescore",
+    "alignment": "08_alignment",
 }
 
 

@@ -5,11 +5,12 @@ interactive optimal binning, WOE, logistic regression, scorecard scaling, valida
 export. The flagship use case is the **application (onboarding) PD scorecard**, and the
 same framework works for fraud, AML and Kaggle-style binary classification.
 
-> **Status:** notebook sections 0–7 run end to end: setup, data intake, sample design,
+> **Status:** notebook sections 0–8 run end to end: setup, data intake, sample design,
 > univariate screening, the interactive binning app, logistic regression, the Siddiqi
-> scorecard and rescoring of new data. Bin-stability and full validation reports come next.
+> scorecard, rescoring, and the scorecard alignment app with exported Python/SQL scoring code.
+> Bin-stability and full validation reports come next.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Luizkauffmann/colab-scorecard-studio/blob/m2-binning-app/notebooks/scorecard_studio.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Luizkauffmann/colab-scorecard-studio/blob/m4c-alignment-app/notebooks/scorecard_studio.ipynb)
 
 ## Install
 
@@ -85,6 +86,37 @@ Each variable enters the model as `"woe"` (one coefficient, expected positive), 
 Siddiqi: Factor = PDO/ln2, Offset = Score − Factor·ln(Odds),
 points = −(β·WOE + α/n)·Factor + Offset/n. Before rounding, a record's points add up exactly to
 the model's score (tested).
+
+## Scorecard alignment app (section 8)
+
+A second app, inside the notebook, on the final scorecard and every scored row:
+
+* **Strategy**: cutoff by maximum profit (benefit of a good, cost of a bad), target approval
+  rate, maximum bad rate, or manual; exact curves over every distinct score; KPIs, profit and
+  rate curves, score distribution, ROC, decision matrix. The cutoff is set on Test (or OOT),
+  approval rates count every row and bad rates only rows with a known outcome. The
+  profit-optimal cutoff is compared with the scale's break-even score as a calibration check.
+* **Scorecard**: editable points per bin with the model's points kept, a reason per override,
+  flags for overrides set under another scale and for bins whose points break the risk order.
+* **Statistics**: AUC, Gini (= 2·AUC − 1), KS per sample, gains table in PDO-wide bands,
+  observed vs expected bad rate, realized PDO and odds, score PSI, each variable's share of the
+  score range.
+* **Export**: the final table (`pts_<var>`, `score`, `pd`, `decision` for every row) and the
+  scoring code: a standalone Python script (`python scorer.py in.csv out.csv`) or SQL
+  (standard, Spark, BigQuery). Both include the data-quality rules, the bins with the
+  Missing/Special choices and the points after overrides, and are tested to reproduce the
+  final table exactly.
+
+```python
+from scorecard_studio.align import launch_alignment
+align = launch_alignment(card, df, "loan_status", store=store, sample=sample,
+                         cost_bad=1000, benefit_good=100)
+align.finalize()                  # or the button
+print(align.code("sql", dialect="bigquery", table="applications"))
+```
+
+`GOOD_CLASS` says which target value is good (0 by default); a higher score always means a
+higher probability of good, so AUC and cutoffs can't be inverted by the coding.
 
 ## Quick start: intake, split, screening
 

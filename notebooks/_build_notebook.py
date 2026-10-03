@@ -3,7 +3,7 @@ import os
 
 import nbformat as nbf
 
-REF = "m2-binning-app"
+REF = "m4c-alignment-app"
 cells = []
 md = lambda s: cells.append(nbf.v4.new_markdown_cell(s.strip()))
 code = lambda s: cells.append(nbf.v4.new_code_cell(s.strip()))
@@ -32,6 +32,7 @@ Every section writes its output to a versioned folder on your Google Drive (`sco
 | 5 | Logistic regression (raw / bins / WOE per variable) | ✅ |
 | 6 | Scorecard (Siddiqi scaling), performance | ✅ |
 | 7 | Rescoring new data | ✅ |
+| 8 | Scorecard alignment app: cutoff strategy, points overrides, statistics, final table, Python/SQL scoring code | ✅ |
 | – | Bin stability report, full validation report, deployment exports | coming |
 
 **Default data:** the Kaggle [Credit Risk Dataset](https://www.kaggle.com/datasets/laotse/credit-risk-dataset) (32,581 loans, target `loan_status`). It is *simulated* bureau-style data with a ~22% default rate, far above a real prime portfolio. It's good for learning the workflow, not for drawing conclusions about real lending.
@@ -58,6 +59,7 @@ import pandas as pd
 from IPython.display import HTML, display
 
 import scorecard_studio as ss
+from scorecard_studio.align import launch_alignment
 from scorecard_studio.app import launch_app
 from scorecard_studio.store import RunStore, in_colab, mount_drive
 
@@ -84,6 +86,8 @@ md("""
 | `REPRESENTATION_DEFAULT`, `REPRESENTATION` | How each variable enters the logistic regression: `"woe"`, `"bins"` (dummies) or `"raw"`. |
 | `SELECTION`, `P_MAX`, `KEEP_IN_MODEL` | `"none"` or `"backward"` elimination (wrong-sign WOE first, then p-value > `P_MAX`); `KEEP_IN_MODEL` is never removed. |
 | `PDO`, `BASE_SCORE`, `BASE_ODDS`, `BASE_POINTS` | Scorecard scaling: `BASE_SCORE` points at `BASE_ODDS`:1 good:bad odds, `PDO` points to double the odds. `BASE_POINTS`: `"spread"` over variables or `"separate"` row. |
+| `GOOD_CLASS` | Which target value is *good* (0 by default: target 1 is the bad / event). A higher score always means a higher probability of good. |
+| `COST_OF_BAD`, `BENEFIT_OF_GOOD` | Economics for the cutoff (section 8): average credit loss on a loan that goes bad, average margin on a loan that pays. |
 
 **Switching to your own data:** change `DATA_SOURCE` and `TARGET`, and empty `EXCLUDE`, `FORCE_INCLUDE` and `PLAUSIBILITY` (they name the demo's columns). A name that isn't in your data stops the run with a *did you mean* suggestion.
 """)
@@ -136,6 +140,11 @@ PDO = 20                # points to double the good:bad odds
 BASE_SCORE = 600        # score at BASE_ODDS
 BASE_ODDS = 50          # good:bad odds at BASE_SCORE (50:1)
 BASE_POINTS = "spread"  # "spread" over the variables (Siddiqi) or "separate"
+GOOD_CLASS = 0          # target value that means good (0: target 1 = bad / event)
+
+# ── Alignment (section 8) ───────────────────────────────────────────────
+COST_OF_BAD = 1000      # average credit loss on a loan that goes bad
+BENEFIT_OF_GOOD = 100   # average margin on a loan that pays
 
 # ── Outputs ─────────────────────────────────────────────────────────────
 OUTPUT_DIR = "/content/drive/MyDrive/scorecard_studio"
@@ -412,7 +421,7 @@ Points are rounded to integers. Before rounding, a record's points add up exactl
 code("""
 scaling = ss.ScalingParams(pdo=PDO, base_score=BASE_SCORE, base_odds=BASE_ODDS)
 card = ss.build_scorecard(model, bundle, scaling, base_points=BASE_POINTS,
-                          plausibility=cfg.plausibility_spec())
+                          plausibility=cfg.plausibility_spec(), good_class=GOOD_CLASS)
 print(f"Factor {scaling.factor:.4f} · Offset {scaling.offset:.4f}")
 display(card.table())
 """)
@@ -456,6 +465,56 @@ rescored = reloaded.score(new_df)
 out_path = store.write_frame("rescore", "rescored.csv", pd.concat([new_df, rescored], axis=1))
 print(f"Rescored {len(rescored):,} rows from {source} -> {out_path}")
 display(pd.concat([new_df, rescored], axis=1).head())
+""")
+
+md("""
+## 8. Scorecard alignment
+
+**What it does:** opens the alignment app on the scorecard from section 6 and every scored row. The settings on the left start from the config cell and can be changed in the app: good class, sample used to set the cutoff, PDO / base score / base odds, base points, cost of a bad, benefit of a good.
+
+| Tab | What you do there |
+|---|---|
+| **Strategy** | Pick the cutoff (approve if score ≥ cutoff). The suggestion maximises profit = benefit × goods approved − cost × bads approved. You can instead target an **approval rate**, a **maximum bad rate** among approved, or set it **manually**. KPIs, profit curve, approval/bad-rate curves, score distribution, ROC and the decision matrix update at once. |
+| **Scorecard** | Every variable and bin with WOE, coefficient, **model points** and the **points in use**. Type new points to override a bin (manual judgment) and give the reason. Overrides are kept through rescaling but flagged when set under another scale; an *order* flag warns when a riskier bin gets more points than a safer one. |
+| **Statistics** | AUC, Gini (= 2·AUC − 1) and KS per sample; the gains table in PDO-wide bands; observed vs expected bad rate per band, and the **realized PDO and odds**; each variable's share of the score range; score PSI. |
+| **Export** | **Create final table**: every row with `pts_<var>` per variable, `score`, `pd` and `decision`. **Scoring code** in Python (standalone script) or SQL (standard, Spark, BigQuery) with everything after your overrides. |
+
+**Why these choices:**
+* The cutoff is set on **Test** (or OOT when you have one), not Train: an in-sample cutoff looks better than it will be.
+* **Approval rates count every row; bad rates only rows with a known outcome.** In onboarding the rows without an outcome are mostly past rejects.
+* The profit-optimal cutoff should sit near the **break-even score** the scale implies (odds = cost ÷ benefit). A large gap means the scale's odds don't hold on this data, i.e. the scorecard needs recalibration before its PD can be used for pricing or provisioning.
+* Every number in the app (KPIs, final table, code) comes from the same points table, so the points always add up to the score.
+
+**Check before moving on:** the cutoff's approval rate and bad rate are acceptable for the business; every override has a reason and no unexplained *order* flag; the realized PDO and odds are close to the design on Test; the score PSI from Train is small.
+
+Every change is saved to `08_alignment/alignment_state.json` and reloaded after a runtime reset.
+""")
+code("""
+align = launch_alignment(card, df, cfg.target, store=store, sample=sample, id_col=ID,
+                         cost_bad=COST_OF_BAD, benefit_good=BENEFIT_OF_GOOD,
+                         dataset_name=intake.source)
+""")
+md("""
+### Final table and scoring code
+
+The **Create final table** button in the app, or the cell below, writes to `08_alignment/`:
+
+* `final_scored.parquet` / `.csv`: every row of every sample with the original variables, `pts_<var>` for each variable, `score`, `pd` (probability of bad) and `decision`;
+* `final_scorecard.json` and `final_scorecard_table.csv`: the final scorecard with overrides, reasons and the cutoff;
+* `scorer.py` and `scorer_standard.sql`: the scoring code.
+
+**Using the scoring code:** `python scorer.py new_applications.csv scored.csv` (no installs needed), or `from scorer import score_record`. The SQL reads a table with the same columns (`input_table` by default; pick the name and dialect in the app) and returns its columns plus the points, score, pd and decision. Both apply the data-quality rules, the bins (with your Missing/Special choices) and the points in use, and are tested to give exactly the scores of the final table.
+""")
+code("""
+final_info = align.finalize()
+final = align.final_table()
+print(f"{final_info['rows']:,} rows · cutoff {final_info['cutoff']:g} · approval {final_info['approval_rate']:.1%}")
+display(final.head())
+for lang in ("python", "sql"):
+    print("Saved", align.session.save_code(lang))
+""")
+code("""
+print(align.code("python")[:1200], "...")
 """)
 
 nb = nbf.v4.new_notebook(cells=cells, metadata={

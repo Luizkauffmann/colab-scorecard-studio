@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scorecard Alignment</title>
+<link rel="stylesheet" href="static/align.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ══════ SETTINGS ══════ -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="app-logo">
+        <div class="logo-icon">SA</div>
+        <div>
+          <div class="logo-title">Scorecard Alignment</div>
+          <div class="logo-sub">cutoff · points · scoring code</div>
+        </div>
+      </div>
+      <div id="dsInfo" class="ds-info"></div>
+    </div>
+    <div class="sidebar-body">
+      <div class="section-label">Target and sample</div>
+      <label for="goodClass">Which target value is good?</label>
+      <select id="goodClass">
+        <option value="0">0 is good (1 = bad / event)</option>
+        <option value="1">1 is good (0 = bad)</option>
+      </select>
+      <div class="hint">A higher score always means a higher probability of good.</div>
+      <label for="stratSample">Sample used to set the cutoff</label>
+      <select id="stratSample"></select>
+
+      <div class="section-label">Scale</div>
+      <div class="grid2">
+        <div><label for="pdo">PDO</label><input type="number" id="pdo" min="1" step="1"></div>
+        <div><label for="baseScore">Base score</label><input type="number" id="baseScore" step="1"></div>
+        <div><label for="baseOdds">Base odds (good:bad)</label><input type="number" id="baseOdds" min="0.01" step="any"></div>
+        <div><label for="basePoints">Base points</label>
+          <select id="basePoints"><option value="spread">spread</option><option value="separate">separate row</option></select></div>
+      </div>
+      <div id="scaleInfo" class="hint"></div>
+
+      <div class="section-label">Economics (per loan)</div>
+      <div class="grid2">
+        <div><label for="costBad">Cost of a bad</label><input type="number" id="costBad" min="0" step="any"></div>
+        <div><label for="benefitGood">Benefit of a good</label><input type="number" id="benefitGood" min="0" step="any"></div>
+      </div>
+      <div class="hint">Cost of a bad: average credit loss on a defaulted loan. Benefit of a good: average margin earned on a loan that pays.</div>
+      <button class="primary" id="btnApply" style="width:100%;margin-top:8px">Apply settings</button>
+    </div>
+    <div class="sidebar-footer">
+      <div id="saveStatus" class="save-status">Not saved yet</div>
+      <button class="success" id="btnFinal" style="width:100%">Create final table</button>
+    </div>
+  </aside>
+
+  <!-- ══════ MAIN ══════ -->
+  <main class="main">
+    <div class="main-tabs">
+      <button class="main-tab active" data-tab="strategy">Strategy</button>
+      <button class="main-tab" data-tab="scorecard">Scorecard</button>
+      <button class="main-tab" data-tab="stats">Statistics</button>
+      <button class="main-tab" data-tab="export">Export</button>
+    </div>
+
+    <!-- Strategy -->
+    <section id="tab-strategy" class="content">
+      <div class="card">
+        <div class="mode-row">
+          <div class="seg" id="modeSeg">
+            <button data-mode="profit">Max profit (suggested)</button>
+            <button data-mode="approval">Approval rate</button>
+            <button data-mode="bad_rate">Max bad rate</button>
+            <button data-mode="manual">Manual</button>
+          </div>
+          <div id="modeInput" class="mode-input"></div>
+        </div>
+        <div id="calibNote" class="note"></div>
+      </div>
+      <div class="kpis" id="kpis"></div>
+      <div class="charts-grid">
+        <div class="card"><div class="card-label">Profit per applicant by cutoff</div><div class="chart-wrap"><canvas id="chProfit"></canvas></div></div>
+        <div class="card"><div class="card-label">Approval rate and bad rate among approved</div><div class="chart-wrap"><canvas id="chRates"></canvas></div></div>
+        <div class="card"><div class="card-label">Score distribution: goods and bads</div><div class="chart-wrap"><canvas id="chDist"></canvas></div></div>
+        <div class="card"><div class="card-label" id="rocLabel">ROC</div><div class="chart-wrap"><canvas id="chRoc"></canvas></div></div>
+      </div>
+      <div class="card">
+        <div class="card-label">Decisions at the cutoff (<span id="cmSample"></span>)</div>
+        <table class="cm" id="cm"></table>
+      </div>
+    </section>
+
+    <!-- Scorecard -->
+    <section id="tab-scorecard" class="content" style="display:none">
+      <div class="card">
+        <div class="sc-head">
+          <div id="scSummary" class="note" style="margin:0"></div>
+          <button id="btnResetAll" class="danger">Reset all overrides</button>
+        </div>
+        <div class="hint" style="margin-top:6px">Type new points and press Enter. The model's points stay in <b>Model pts</b>; overrides are flagged and need a reason for the model documentation. <b>Order</b> flags a riskier bin that now gets more points than a safer one.</div>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <table class="btable" id="scTable"></table>
+      </div>
+    </section>
+
+    <!-- Statistics -->
+    <section id="tab-stats" class="content" style="display:none">
+      <div class="card">
+        <div class="card-label">Performance and realized scale by sample <span id="designNote" class="muted"></span></div>
+        <table class="btable" id="perfTable"></table>
+        <div id="psiNote" class="note"></div>
+      </div>
+      <div class="charts-grid">
+        <div class="card"><div class="card-label">Observed vs expected bad rate by score band (<select id="gainsSample" class="inline-select"></select>)</div><div class="chart-wrap"><canvas id="chCalib"></canvas></div></div>
+        <div class="card"><div class="card-label">Each variable's share of the score range</div><div class="chart-wrap"><canvas id="chContrib"></canvas></div></div>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <div class="card-label">Gains table (bands of PDO points, highest scores first)</div>
+        <table class="btable" id="gainsTable"></table>
+      </div>
+    </section>
+
+    <!-- Export -->
+    <section id="tab-export" class="content" style="display:none">
+      <div class="card">
+        <div class="card-label">Final table</div>
+        <p class="hint">Every row of every sample with the original variables, <code>pts_&lt;var&gt;</code> for each variable, <code>score</code>, <code>pd</code> (probability of bad) and the <code>decision</code> at the cutoff. Points include your overrides. Also saves <code>final_scorecard.json</code>.</p>
+        <button class="success" id="btnFinal2">Create final table</button>
+        <div id="finalInfo" class="note"></div>
+        <div style="overflow-x:auto"><table class="btable" id="finalPreview"></table></div>
+      </div>
+      <div class="card">
+        <div class="card-label">Scoring code</div>
+        <p class="hint">Runs on any table with the same columns: data-quality rules → bins (with your Missing/Special choices) → points (with overrides) → score, pd and decision.</p>
+        <div class="code-bar">
+          <select id="codeLang" style="width:auto">
+            <option value="python">Python (standalone script)</option>
+            <option value="sql:standard">SQL (standard)</option>
+            <option value="sql:spark">Spark SQL</option>
+            <option value="sql:bigquery">BigQuery</option>
+          </select>
+          <input type="text" id="codeTable" value="input_table" title="Source table (SQL)" style="width:180px">
+          <button id="btnCode">Preview</button>
+          <button class="primary" id="btnCodeSave">Save to Drive</button>
+          <button id="btnCodeDl">Download</button>
+        </div>
+        <div id="codeNote" class="note"></div>
+        <pre class="code-block" id="codeBox">Choose a language and click Preview.</pre>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="busy" class="busy" style="display:none"><div class="busy-spinner"></div><div id="busyMsg">Working…</div></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="static/align.js"></script>
+</body>
+</html>
