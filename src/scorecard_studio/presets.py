@@ -21,6 +21,8 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                            min_bin_size=0.05, min_bin_n_event=None, cat_cutoff=0.05),
         "split": "time",          # out-of-time validation when a date column exists
         "metrics": ["gini", "ks", "auc", "psi"],
+        # Univariate screening on Train. IV above iv_max is held for review, not dropped.
+        "screening": dict(iv_min=0.10, iv_max=0.50),
     },
     "fraud": {
         "description": "Transaction or application fraud; event rates often below 1%.",
@@ -31,6 +33,8 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                            min_bin_size=0.02, min_bin_n_event=30, cat_cutoff=0.02),
         "split": "time",
         "metrics": ["pr_auc", "recall_at_alert_rate", "gini", "ks"],
+        # IV is small and noisy when events are rare; a 0.10 floor drops useful variables.
+        "screening": dict(iv_min=0.02, iv_max=0.50),
     },
     "aml": {
         "description": "AML / transaction monitoring; few, noisy (SAR/case) labels.",
@@ -39,6 +43,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                            min_bin_size=0.03, min_bin_n_event=20, cat_cutoff=0.03),
         "split": "time",
         "metrics": ["pr_auc", "recall_at_alert_rate", "gini", "ks"],
+        "screening": dict(iv_min=0.02, iv_max=0.50),
     },
     "kaggle": {
         "description": "Generic binary classification. Fit bins out-of-fold when cross-validating.",
@@ -47,6 +52,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                            min_bin_size=0.02, min_bin_n_event=None, cat_cutoff=0.01),
         "split": "random",
         "metrics": ["auc", "gini", "ks"],
+        "screening": dict(iv_min=0.02, iv_max=0.50),
     },
 }
 

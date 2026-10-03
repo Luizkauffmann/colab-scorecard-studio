@@ -21,3 +21,6 @@ scorer.py
 transform.sql
 scorecard_table.csv
 binning_config.json
+
+# ...except the public demo dataset shipped with the package
+!src/scorecard_studio/data/
