@@ -142,3 +142,17 @@ def test_id_like_rules():
     assert not is_id_like(pd.Series(np.random.default_rng(0).normal(size=n)), "numerical")
     assert is_id_like(pd.Series([f"c{i}" for i in range(n)]), "categorical")
     assert not is_id_like(pd.Series(["a", "b"] * 250), "categorical")
+
+
+def test_borderline_iv_is_flagged(prepared):
+    cfg, it, sample = prepared
+    base = _screen(cfg, it, sample, iv_min=0.0001, iv_max=50.0).table.set_index("variable")
+    iv = float(base.at["person_income", "iv"])
+    just_above = _screen(cfg, it, sample, iv_min=iv * 0.95, iv_max=50.0).table.set_index("variable")
+    assert just_above.at["person_income", "status"] == "selected"
+    assert "borderline" in just_above.at["person_income", "reason"]
+    just_below = _screen(cfg, it, sample, iv_min=iv * 1.05, iv_max=50.0).table.set_index("variable")
+    assert just_below.at["person_income", "status"] == "low_iv"
+    assert "borderline" in just_below.at["person_income", "reason"]
+    far = _screen(cfg, it, sample, iv_min=iv * 0.5, iv_max=50.0).table.set_index("variable")
+    assert "borderline" not in far.at["person_income", "reason"]

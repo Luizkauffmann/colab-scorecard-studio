@@ -230,6 +230,9 @@ def screen_variables(
                 status, reason = LOW_IV, f"IV {iv:.3f} < IV_MIN {iv_min}"
             else:
                 status, reason = SELECTED, f"IV_MIN {iv_min} <= IV {iv:.3f} <= IV_MAX {iv_max}"
+        if status in (SELECTED, LOW_IV, REVIEW) and _borderline(row["iv"], iv_min, iv_max):
+            reason += (" [borderline: within 10% of a threshold, the status can change with "
+                       "the split; decide on business grounds]")
         row.update(status=status, reason=reason)
         rows.append(row)
 
@@ -245,6 +248,13 @@ def screen_variables(
               "corr_threshold": corr_threshold, "train_rows": int(len(train)),
               "train_events": int(train[target].sum())}
     return ScreeningResult(table=table, engine=engine, correlated_pairs=pairs, params=params)
+
+
+def _borderline(iv: float, iv_min: float, iv_max: float, rel: float = 0.10) -> bool:
+    """IV within ``rel`` (relative) of either threshold. IV is a sample
+    estimate: a variable at 0.098 vs a 0.10 cutoff is not meaningfully weaker
+    than one at 0.102."""
+    return any(t > 0 and abs(iv - t) <= rel * t for t in (iv_min, iv_max))
 
 
 def correlated_pairs(train: pd.DataFrame, table: pd.DataFrame,

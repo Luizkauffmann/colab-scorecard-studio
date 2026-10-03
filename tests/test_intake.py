@@ -73,8 +73,15 @@ def test_packaged_source_raises_when_file_absent():
 
 @pytest.mark.skipif(_read_packaged() is None, reason="dataset not packaged in this install")
 def test_packaged_dataset_is_the_kaggle_file():
+    import gzip
+    import hashlib
+    from importlib import resources
+    raw = gzip.decompress(resources.files("scorecard_studio").joinpath(
+        "data", "credit_risk_dataset.csv.gz").read_bytes())
+    assert hashlib.sha256(raw).hexdigest() == \
+        "ce3c6d2167717bf1627d1c0c81cbccd28323cd4aa7b96d542599366d5ff6aac8"
     df = load_credit_risk_dataset("packaged")
-    assert df.shape == (32_581, 12)
+    assert df.shape == (32_581, 12) and df["loan_status"].sum() == 7108
     assert df["person_emp_length"].isna().sum() == 895 and df["loan_int_rate"].isna().sum() == 3116
 
 
