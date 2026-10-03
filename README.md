@@ -5,11 +5,11 @@ interactive optimal binning, WOE, logistic regression, scorecard scaling, valida
 export. The flagship use case is the **application (onboarding) PD scorecard**, and the
 same framework works for fraud, AML and Kaggle-style binary classification.
 
-> **Status:** Milestone 1 (engine) is done, and notebook sections 0–3 (setup, data intake,
-> sample design, univariate screening) run end to end. The interactive binning app arrives in
-> Milestone 2.
+> **Status:** notebook sections 0–4 run end to end: setup, data intake, sample design,
+> univariate screening, and the interactive binning app with the model-ready dataset.
+> Modeling, scaling and validation come next.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Luizkauffmann/colab-scorecard-studio/blob/m1b-intake-screening/notebooks/scorecard_studio.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Luizkauffmann/colab-scorecard-studio/blob/m2-binning-app/notebooks/scorecard_studio.ipynb)
 
 ## Install
 
@@ -29,6 +29,32 @@ The default data is the Kaggle [Credit Risk Dataset](https://www.kaggle.com/data
 (`laotse/credit-risk-dataset`, target `loan_status`), loaded with no Kaggle account. The demo
 config excludes `loan_grade` and `loan_int_rate` (lender-assigned, so circular in an application
 model) and sends impossible ages and employment lengths to the Special bin.
+
+## The binning app
+
+Section 4 opens an interactive binning app inside the notebook output (Flask in a background
+thread, served through Colab's own port proxy: no public tunnel). It is a port of the
+[Dataiku webapp](https://github.com/Luizkauffmann/scorecard-binning):
+
+* drag cutoffs on the variable's histogram, double-click to add one, type exact values
+* merge adjacent bins, split a bin at its median, regroup categories with chips
+* re-run optimal binning with other settings, or reset to the automatic result
+* Missing and Special are fixed bins; flags for empty, tiny, zero-event and non-monotonic bins
+* every change is saved to Drive (`04_binning/binning_config.json`) and reloaded after a
+  runtime reset when the Train sample is the same
+
+**Create output dataset** writes `model_dataset.parquet` with every sample (Train, Test, OOT)
+and, per selected variable, the original column, `opt_<var>` (bin, ordered category) and
+`woe_<var>`. Test and OOT get the Train bins through the same scoring code as the exported
+`scorer.py` and SQL (tested row for row).
+
+```python
+from scorecard_studio.app import launch_app
+app = launch_app(train, "loan_status", store=store, full=df, sample=sample,
+                 screen=screen, special_codes=intake.special_codes, fit_params=cfg.fit_params)
+app.save_output()          # or the button in the app
+app.engine                 # the fitted BinningEngine
+```
 
 ## Quick start: intake, split, screening
 
@@ -124,8 +150,8 @@ pytest
 ## Roadmap
 
 1. **Engine package**: done. Intake, sample design and screening (notebook sections 0–3): done
-2. Interactive binning app running inside Colab, with state saved to Google Drive
-3. Model-ready output dataset (WOE or bin dummies) for Train / Test / OOT
+2. Interactive binning app running inside Colab, with state saved to Google Drive: done
+3. Model-ready output dataset (`opt_` bins and `woe_` columns) for Train / Test / OOT: done; bin stability report next
 4. Variable selection, logistic regression, scorecard scaling
 5. Validation report and deployment exports
 6. Public template, sample datasets, walkthrough
