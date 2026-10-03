@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Never commit real modeling data
+data/
+*.parquet
+*.csv
+!tests/fixtures/*.csv
+
+# Generated exports
+bundle.json
+scorer.py
+transform.sql
+scorecard_table.csv
+binning_config.json
