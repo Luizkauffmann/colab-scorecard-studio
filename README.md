@@ -10,7 +10,7 @@ same framework works for fraud, AML and Kaggle-style binary classification.
 > scorecard, rescoring, and the scorecard alignment app with exported Python/SQL scoring code.
 > Bin-stability and full validation reports come next.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Luizkauffmann/colab-scorecard-studio/blob/m4c-alignment-app/notebooks/scorecard_studio.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Luizkauffmann/colab-scorecard-studio/blob/main/notebooks/scorecard_studio.ipynb)
 
 ## Install
 

@@ -3,7 +3,7 @@ import os
 
 import nbformat as nbf
 
-REF = "m4c-alignment-app"
+REF = "main"
 cells = []
 md = lambda s: cells.append(nbf.v4.new_markdown_cell(s.strip()))
 code = lambda s: cells.append(nbf.v4.new_code_cell(s.strip()))
