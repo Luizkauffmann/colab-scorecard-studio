@@ -264,6 +264,7 @@ class BinningEngine:
             params["monotonic_trend"] = MONOTONIC_MAP[monotonic]
             optb = OptimalBinning(**params)
             optb.fit(x_clean, y_clean)
+            _check_solver_status(variable, optb, settings)
             cutoffs = sorted(float(c) for c in np.asarray(optb.splits).ravel())
             result = self._build(variable, dtype, cutoffs=cutoffs, specials=specials, settings=settings)
             if monotonic != "none" and not result.is_monotonic:
@@ -276,6 +277,7 @@ class BinningEngine:
                 params["cat_cutoff"] = float(cat_cutoff)
             optb = OptimalBinning(**params)
             optb.fit(x_clean, y_clean)
+            _check_solver_status(variable, optb, settings)
             groups = [[str(c) for c in g] for g in (optb.splits or []) if len(g) > 0]
             seen = {c for g in groups for c in g}
             leftovers = sorted(set(x_clean) - seen)
@@ -544,6 +546,18 @@ class BinningEngine:
             is_monotonic=is_mono, monotonic_direction=direction,
             settings=settings, warnings=warnings,
         )
+
+
+def _check_solver_status(variable: str, optb, settings: Dict[str, Any]) -> None:
+    """optbinning does not raise when the constraints cannot be met: it returns
+    no splits, which would look like a legitimate one-bin variable with a small
+    IV. Fail loudly instead."""
+    status = str(getattr(optb, "status", "OPTIMAL"))
+    if status not in ("OPTIMAL", "FEASIBLE"):
+        raise ValueError(
+            f"No binning of '{variable}' satisfies the constraints (solver status {status}). "
+            f"Relax min_bin_size={settings.get('min_bin_size')}, "
+            f"min_bin_n_event={settings.get('min_bin_n_event')} or max_bins={settings.get('max_bins')}.")
 
 
 def _fmt(v: float) -> str:

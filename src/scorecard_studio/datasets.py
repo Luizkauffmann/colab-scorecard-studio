@@ -111,3 +111,82 @@ def make_credit_application_data(n: int = 20_000, default_rate: float = 0.08,
         CREDIT_DEMO_TARGET: target,
     })
     return df.sort_values(CREDIT_DEMO_DATE, kind="stable").reset_index(drop=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Default demo dataset: Kaggle "Credit Risk Dataset" (laotse/credit-risk-dataset)
+# ═══════════════════════════════════════════════════════════════════════════
+
+CREDIT_RISK_TARGET = "loan_status"
+CREDIT_RISK_COLUMNS = [
+    "person_age", "person_income", "person_home_ownership", "person_emp_length",
+    "loan_intent", "loan_grade", "loan_amnt", "loan_int_rate", "loan_status",
+    "loan_percent_income", "cb_person_default_on_file", "cb_person_cred_hist_length",
+]
+CREDIT_RISK_N_ROWS = 32_581
+CREDIT_RISK_OPENML_ID = 43454
+CREDIT_RISK_KAGGLE = "laotse/credit-risk-dataset"
+
+#: Lender-assigned outputs of a previous risk assessment. Using them in an
+#: application PD model means re-learning the old scorecard.
+CREDIT_RISK_EXCLUDE = ["loan_grade", "loan_int_rate"]
+
+#: Values outside these ranges are data errors (ages of 123 and 144, 123 years
+#: of employment), not extreme applicants.
+CREDIT_RISK_PLAUSIBILITY = {"person_age": (18, 100), "person_emp_length": (0, 60)}
+
+_PACKAGED_FILE = "credit_risk_dataset.csv.gz"
+
+
+def load_credit_risk_dataset(source: str = "auto") -> pd.DataFrame:
+    """Load the Kaggle Credit Risk Dataset (target ``loan_status``, 1 = default).
+
+    ``source``: ``"packaged"`` (copy shipped with this package), ``"openml"``
+    (OpenML dataset 43454, no login, needs scikit-learn and internet) or
+    ``"auto"`` (packaged if present, else OpenML).
+    """
+    if source not in ("auto", "packaged", "openml"):
+        raise ValueError("source must be 'auto', 'packaged' or 'openml'")
+    if source in ("auto", "packaged"):
+        df = _read_packaged()
+        if df is not None:
+            return _normalise_credit_risk(df)
+        if source == "packaged":
+            raise FileNotFoundError(f"{_PACKAGED_FILE} is not shipped with this install.")
+    try:
+        from sklearn.datasets import fetch_openml
+    except ImportError as exc:  # pragma: no cover - Colab ships scikit-learn
+        raise ImportError("Loading from OpenML needs scikit-learn: pip install scikit-learn") from exc
+    frame = fetch_openml(data_id=CREDIT_RISK_OPENML_ID, as_frame=True, parser="auto").frame
+    return _normalise_credit_risk(frame)
+
+
+def _read_packaged():
+    from importlib import resources
+    try:
+        ref = resources.files("scorecard_studio").joinpath("data", _PACKAGED_FILE)
+        if not ref.is_file():
+            return None
+        with resources.as_file(ref) as path:
+            return pd.read_csv(path)
+    except (FileNotFoundError, ModuleNotFoundError):
+        return None
+
+
+def _normalise_credit_risk(df: pd.DataFrame) -> pd.DataFrame:
+    """Same column order and dtypes whatever the source (CSV or OpenML ARFF)."""
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    missing = [c for c in CREDIT_RISK_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Not the Credit Risk Dataset: columns {missing} are missing.")
+    df = df[CREDIT_RISK_COLUMNS]
+    for c in ("person_home_ownership", "loan_intent", "loan_grade", "cb_person_default_on_file"):
+        s = df[c].astype(object)
+        df[c] = s.where(s.notna(), None).map(lambda v: None if v is None else str(v)).astype(object)
+    for c in ("person_age", "person_income", "loan_amnt", "cb_person_cred_hist_length"):
+        df[c] = pd.to_numeric(df[c]).astype("int64")
+    for c in ("person_emp_length", "loan_int_rate", "loan_percent_income"):
+        df[c] = pd.to_numeric(df[c]).astype("float64")
+    df[CREDIT_RISK_TARGET] = pd.to_numeric(df[CREDIT_RISK_TARGET]).astype("int64")
+    return df.reset_index(drop=True)
