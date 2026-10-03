@@ -5,6 +5,11 @@
 
 // ── API ──────────────────────────────────────────────────────────────
 async function api(path, body) {
+  // Every call is for the target picked in the sidebar.
+  if (S.target) {
+    if (body) body = Object.assign({ target: S.target }, body);
+    else path += (path.includes('?') ? '&' : '?') + 'target=' + encodeURIComponent(S.target);
+  }
   const opts = { method: body ? 'POST' : 'GET', headers: { Accept: 'application/json' } };
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const res = await fetch(path, opts);
@@ -20,6 +25,7 @@ async function api(path, body) {
 
 // ── State ────────────────────────────────────────────────────────────
 const S = {
+  target: null,       // current target (null = primary)
   state: null,        // /api/state
   cur: null,          // payload of the open variable
   selected: new Set(),// selected bin groups
@@ -65,16 +71,42 @@ async function run(msg, fn) {
 window.addEventListener('DOMContentLoaded', async () => {
   wireStatic();
   try {
-    S.state = await api('api/state');
+    S.state = (await api('api/state')).state;
+    S.target = S.state.target;
+    renderTargets();
     renderSidebar();
-    const first = S.state.variables.find((v) => v.included) || S.state.variables[0];
-    if (first) await openVar(first.name);
+    await openFirst();
   } catch (e) { toast('Could not reach the app backend: ' + e.message, 'error'); }
 });
+
+async function openFirst() {
+  const first = S.state.variables.find((v) => v.included) || S.state.variables[0];
+  if (first) await openVar(first.name);
+}
+
+function renderTargets() {
+  const t = S.state.targets || [S.state.target];
+  const wrap = $('targetWrap');
+  wrap.style.display = t.length > 1 ? '' : 'none';
+  const sel = $('targetSel');
+  sel.innerHTML = t.map((x) => '<option value="' + esc(x) + '"' + (x === S.target ? ' selected' : '') + '>' +
+    esc(x) + (x === S.state.primary ? ' (primary)' : '') + '</option>').join('');
+}
+
+async function switchTarget(t) {
+  S.target = t;
+  S.cur = null;
+  await run('Switching to ' + t + '…', async () => {
+    S.state = (await api('api/state')).state;
+    renderSidebar();
+  });
+  await openFirst();
+}
 
 function wireStatic() {
   $('binSlider').addEventListener('input', function () { $('binLbl').textContent = this.value; });
   $('btnFit').onclick = fitCurrent;
+  $('targetSel').onchange = function () { switchTarget(this.value); };
   $('btnReset').onclick = resetCurrent;
   $('btnOutput').onclick = createOutput;
   $('toggleOthers').onclick = () => { S.showOthers = !S.showOthers; renderSidebar(); };
@@ -280,6 +312,8 @@ function renderTable() {
   const flagged = new Set((v.flags || []).filter((f) => f.level === 'error' && f.group != null).map((f) => f.group));
   v.bins.forEach((b) => {
     const fixed = b.kind !== 'regular';
+    const key = fixed ? (b.kind === 'missing' ? 0 : -1) : b.group;   // selection id
+    const alias = b.merged_into != null;                            // merged Missing/Special
     const ri = reg.indexOf(b);
     let trend = '';
     if (!fixed && ri > 0) {
@@ -293,29 +327,37 @@ function renderTable() {
       if (ri < reg.length - 1) actions += '<button class="row-btn" data-act="edit" data-i="' + ri + '" title="Edit the upper boundary">✎</button> ';
       actions += '<button class="row-btn" data-act="split" data-g="' + b.group + '" title="Split at the bin median">⊕ split</button>';
     }
-    const sel = S.selected.has(b.group);
+    if (fixed) actions = treatmentSelect(b.kind);
+    const sel = S.selected.has(key);
+    const name = b.kind === 'missing' ? 'Missing' : 'Special';
+    let desc = '';
+    if (fixed && alias) desc = b.merged_into === 0 ? '→ combined with Missing' : '→ merged into G' + b.merged_into;
+    else if (fixed) desc = b.label !== name ? esc(b.label) : 'own bin';
     const tr = document.createElement('tr');
-    tr.className = 'bin-row' + (sel ? ' selected' : '') + (fixed ? ' fixed' : '') + (flagged.has(b.group) ? ' flag-error' : '');
-    tr.dataset.group = b.group;
+    tr.className = 'bin-row' + (sel ? ' selected' : '') + (fixed ? ' fixed' : '') + (flagged.has(b.group) && !alias ? ' flag-error' : '');
+    tr.dataset.group = key;
+    const n = (x) => (alias ? '—' : x);
     tr.innerHTML =
-      '<td>' + (fixed ? '' : '<input type="checkbox"' + (sel ? ' checked' : '') + ' aria-label="select bin ' + b.group + '">') + '</td>' +
-      '<td>' + (fixed ? esc(b.label) + '<span class="fixed-pill">fixed</span>' : 'G' + b.group) + '</td>' +
-      '<td style="max-width:300px;white-space:normal">' + (fixed ? '' : rangeTxt) + '</td>' +
-      '<td class="r">' + b.count.toLocaleString() + '</td>' +
-      '<td class="r">' + pct(b.share) + '</td>' +
-      '<td class="r">' + b.event_count.toLocaleString() + '</td>' +
-      '<td class="r">' + pct(b.event_rate) + '</td>' +
+      '<td>' + (alias ? '' : '<input type="checkbox"' + (sel ? ' checked' : '') + ' aria-label="select ' + (fixed ? name : 'bin ' + b.group) + '">') + '</td>' +
+      '<td>' + (fixed ? name + '<span class="fixed-pill">' + (alias ? 'merged' : 'fixed') + '</span>' : 'G' + b.group) + '</td>' +
+      '<td style="max-width:300px;white-space:normal">' + (fixed ? '<span class="muted">' + desc + '</span>' : rangeTxt) + '</td>' +
+      '<td class="r">' + n(b.count.toLocaleString()) + '</td>' +
+      '<td class="r">' + n(pct(b.share)) + '</td>' +
+      '<td class="r">' + n(b.event_count.toLocaleString()) + '</td>' +
+      '<td class="r">' + n(pct(b.event_rate)) + '</td>' +
       '<td class="r ' + wc + '">' + (b.woe == null ? '—' : b.woe.toFixed(4)) + '</td>' +
-      '<td class="r">' + (b.iv_contribution == null ? '—' : b.iv_contribution.toFixed(4)) + '</td>' +
+      '<td class="r">' + n(b.iv_contribution == null ? '—' : b.iv_contribution.toFixed(4)) + '</td>' +
       '<td>' + trend + '</td>' +
       '<td style="white-space:nowrap">' + actions + '</td>';
-    if (!fixed) {
+    if (!alias) {
       tr.addEventListener('click', (e) => {
-        if (e.target.tagName === 'BUTTON') return;
+        if (e.target.tagName === 'BUTTON' || e.target.tagName === 'SELECT' || e.target.tagName === 'OPTION') return;
         const multi = e.shiftKey || e.ctrlKey || e.metaKey || e.target.tagName === 'INPUT';
-        toggleRow(b.group, multi);
+        toggleRow(key, multi);
       });
     }
+    const ts = tr.querySelector('select.treat');
+    if (ts) ts.onchange = () => setTreatment(ts.dataset.kind, ts.value);
     tr.querySelectorAll('button[data-act]').forEach((btn) => {
       btn.onclick = (e) => {
         e.stopPropagation();
@@ -350,7 +392,7 @@ function updateBinToolbar() {
   const isNum = S.cur.dtype === 'numerical';
   if (!S.selected.size) {
     hint.style.display = '';
-    hint.textContent = 'Click a bin to select it · Shift/Ctrl/⌘-click to select several · Missing and Special are fixed bins';
+    hint.textContent = 'Click a bin to select it · Shift/Ctrl/⌘-click to select several · select Missing or Special with a bin to merge them, or use their dropdown';
     return;
   }
   hint.style.display = 'none';
@@ -358,32 +400,56 @@ function updateBinToolbar() {
   const add = (el) => { el.classList.add('tb-action'); tb.appendChild(el); };
   const lbl = document.createElement('span');
   lbl.style.cssText = 'font-size:11px;color:#1a6fc4;font-weight:600';
-  lbl.textContent = gs.length + ' selected (' + gs.map((g) => 'G' + g).join(', ') + ')';
+  lbl.textContent = gs.length + ' selected (' + gs.map((g) => (g === 0 ? 'Missing' : g === -1 ? 'Special' : 'G' + g)).join(', ') + ')';
   add(lbl);
   if (gs.length >= 2) {
-    const adjacent = gs.every((g, i) => i === 0 || g === gs[i - 1] + 1);
+    const regs = gs.filter((g) => g > 0);
+    const adjacent = regs.every((g, i) => i === 0 || g === regs[i - 1] + 1);
     const btn = document.createElement('button');
     btn.className = 'primary';
     btn.textContent = 'Merge ' + gs.length + ' bins';
     btn.disabled = isNum && !adjacent;
-    btn.title = btn.disabled ? 'Only adjacent numerical bins can be merged' : 'Merge into one bin';
+    btn.title = btn.disabled ? 'Only adjacent numerical bins can be merged'
+      : regs.length < gs.length ? 'Missing/Special will be scored as the merged bin' : 'Merge into one bin';
     btn.onclick = () => mergeBins(gs);
     add(btn);
     if (btn.disabled) { const w = document.createElement('span'); w.style.cssText = 'font-size:10.5px;color:#c0392b'; w.textContent = 'select adjacent bins'; add(w); }
   }
-  if (gs.length === 1 && isNum) {
+  if (gs.length === 1 && isNum && gs[0] > 0) {
     const reg = regularBins();
     const i = reg.findIndex((b) => b.group === gs[0]);
     if (i < reg.length - 1) { const b = document.createElement('button'); b.className = 'ghost'; b.textContent = '✎ Edit upper boundary'; b.onclick = () => openThreshModal(i); add(b); }
     const sp = document.createElement('button'); sp.className = 'ghost'; sp.textContent = '⊕ Split at median'; sp.onclick = () => splitBin(gs[0]); add(sp);
   }
-  if (gs.length === 1 && !isNum) {
+  if (gs.length === 1 && !isNum && gs[0] > 0) {
     const b = document.createElement('button'); b.className = 'ghost'; b.textContent = 'Edit categories →'; b.onclick = () => switchTab('cat'); add(b);
   }
   const clr = document.createElement('button');
   clr.textContent = 'Clear';
   clr.onclick = () => { S.selected.clear(); renderTable(); highlightBins(); };
   add(clr);
+}
+
+// ── Missing / Special treatment (a modeling choice) ──────────────────
+function treatmentSelect(kind) {
+  const v = S.cur;
+  const cur = kind === 'missing' ? v.missing_to : v.special_to;
+  const opts = [['separate', 'Separate bin']];
+  if (kind === 'special') opts.push(['0', 'With Missing']);
+  regularBins().forEach((b) => opts.push([String(b.group), 'Merge into G' + b.group]));
+  const val = cur == null ? 'separate' : String(cur);
+  return '<select class="treat" data-kind="' + kind + '" title="How ' + kind + ' values are binned" style="width:auto;font-size:11px;padding:2px 6px">' +
+    opts.map(([k, t]) => '<option value="' + k + '"' + (k === val ? ' selected' : '') + '>' + t + '</option>').join('') + '</select>';
+}
+function setTreatment(kind, value) {
+  const v = S.cur;
+  const toInt = (x) => (x === 'separate' ? null : parseInt(x, 10));
+  const body = { name: v.variable, missing_to: v.missing_to, special_to: v.special_to };
+  if (kind === 'missing') body.missing_to = toInt(value); else body.special_to = toInt(value);
+  run('Updating ' + kind + ' treatment…', async () => {
+    const r = await api('api/fixed', body);
+    afterChange(r, kind === 'missing' ? 'Missing treatment updated.' : 'Special treatment updated.');
+  });
 }
 
 // ── Bin operations ───────────────────────────────────────────────────

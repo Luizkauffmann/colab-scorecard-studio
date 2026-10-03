@@ -21,6 +21,9 @@ STAGES = {
     "split": "02_split",
     "screening": "03_screening",
     "binning": "04_binning",
+    "model": "05_model",
+    "scorecard": "06_scorecard",
+    "rescore": "07_rescore",
 }
 
 

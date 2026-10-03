@@ -78,8 +78,9 @@ def test_cutoffs_split_merge(setup):
     assert r["cutoffs"] == [30000, 50000, 80000]
     with pytest.raises(AppError, match="adjacent"):
         s.merge(v, [1, 3])
-    with pytest.raises(AppError, match="fixed bin"):
-        s.merge(v, [1, 0])                                  # Missing is group 0
+    r = s.merge(v, [1, 0])["variable"]                       # Missing (group 0) into G1
+    assert r["missing_to"] == 1 and r["cutoffs"] == [30000, 50000, 80000]
+    s.set_fixed(v, missing_to=None)
     with pytest.raises(AppError, match="outside"):
         s.split(v, 1, at=60000)
 
@@ -223,7 +224,7 @@ def test_routes(setup, tmp_path):
     c = create_app(s).test_client()
     assert b"Scorecard Binning" in c.get("/").data
     assert c.get("/static/app.js").status_code == 200
-    st = c.get("/api/state").get_json()
+    st = c.get("/api/state").get_json()["state"]
     assert st["included"] == s.included and st["rows"] == len(setup[3])
     p = c.get("/api/variable?name=person_income").get_json()["variable"]
     assert p["dtype"] == "numerical" and p["hist"]["counts"] and p["hist"]["integer"]
@@ -264,7 +265,7 @@ def test_launch_serves_and_resumes(setup, tmp_path):
     app = launch_app(train, "loan_status", store=store, show=False, **kw)
     try:
         with urllib.request.urlopen(app.url + "api/state", timeout=10) as resp:
-            assert json.load(resp)["rows"] == len(train)
+            assert json.load(resp)["state"]["rows"] == len(train)
         app.session.set_cutoffs("person_income", [20000, 40000])
     finally:
         app.stop()
@@ -287,3 +288,74 @@ def test_launch_serves_and_resumes(setup, tmp_path):
         assert app3.session.result("person_income").cutoffs == screen.result("person_income").cutoffs
     finally:
         app3.stop()
+
+
+
+# ── several candidate targets ────────────────────────────────────────
+
+@pytest.fixture
+def two_targets(credit_risk_like):
+    df = credit_risk_like.copy()
+    rng = np.random.default_rng(3)
+    # a second outcome: correlated with the first, unknown for 10% of rows
+    alt = np.where(rng.random(len(df)) < 0.85, df["loan_status"], 1 - df["loan_status"]).astype(float)
+    alt[rng.random(len(df)) < 0.10] = np.nan
+    df["default_24m"] = alt
+    cfg = StudioConfig(target="loan_status", alt_targets=["default_24m"], exclude=CREDIT_RISK_EXCLUDE,
+                       plausibility=CREDIT_RISK_PLAUSIBILITY)
+    it = run_intake(cfg, df=df)
+    sample = make_split(it.df, "loan_status", seed=1)
+    train = it.df[sample == "train"]
+    from scorecard_studio import screen_all_targets
+    screens = screen_all_targets(train, cfg.targets, iv_min=0.05, iv_max=5.0, fit_params=cfg.fit_params,
+                                 exclude=cfg.exclude, special_codes=it.special_codes, id_col=it.id_col)
+    return cfg, it, sample, train, screens
+
+
+def test_alt_target_intake_and_screening(two_targets):
+    cfg, it, sample, train, screens = two_targets
+    assert it.report["alt_targets"]["default_24m"]["rows_unknown"] > 0
+    assert len(it.df) == it.report["rows"]                       # unknown alt outcome: row kept
+    roles = it.dictionary.set_index("column")["role"]
+    assert roles["default_24m"] == "alternative target"
+    for t, other in (("loan_status", "default_24m"), ("default_24m", "loan_status")):
+        assert other not in set(screens[t].table["variable"])     # never a predictor
+    assert screens["default_24m"].params["train_rows"] == int(train["default_24m"].notna().sum())
+
+
+def test_app_has_one_workspace_per_target(two_targets, tmp_path):
+    cfg, it, sample, train, screens = two_targets
+    store = RunStore(str(tmp_path / "runs"), run_id="run_20260101_000000")
+    app = launch_app(train, "loan_status", alt_targets=["default_24m"], screens=screens, store=store,
+                     show=False, full=it.df, sample=sample, id_col=it.id_col,
+                     special_codes=it.special_codes, fit_params=cfg.fit_params)
+    try:
+        assert app.targets == ["loan_status", "default_24m"]
+        alt = app.sessions["default_24m"]
+        assert len(alt.train) == int(train["default_24m"].notna().sum())
+        assert "loan_status" not in alt.vars and "default_24m" not in app.session.vars
+        c = create_app(app.sessions, "loan_status").test_client()
+        st = c.get("/api/state?target=default_24m").get_json()["state"]
+        assert st["target"] == "default_24m" and st["targets"] == ["loan_status", "default_24m"]
+        r = c.post("/api/cutoffs", json={"target": "default_24m", "name": "person_income",
+                                         "cutoffs": [30000, 60000]}).get_json()
+        assert r["variable"]["cutoffs"] == [30000, 60000]
+        assert app.session.result("person_income").cutoffs != [30000, 60000]   # primary untouched
+        assert c.get("/api/state?target=nope").status_code == 400
+        out = app.save_output(target="default_24m")
+        assert out["paths"]["dataset"].endswith("04_binning/default_24m/model_dataset.parquet")
+        d = pd.read_parquet(out["paths"]["dataset"])
+        assert "default_24m" in d and "loan_status" not in d and d["default_24m"].notna().all()
+        assert len(d) == int(it.df["default_24m"].notna().sum())
+    finally:
+        app.stop()
+
+
+def test_alt_target_config_checks():
+    from scorecard_studio import ConfigError
+    with pytest.raises(ConfigError, match="different columns"):
+        StudioConfig(target="y", alt_targets=["y"]).validate()
+    with pytest.raises(ConfigError, match="never predictors"):
+        StudioConfig(target="y", alt_targets=["y2"], exclude=["y2"]).validate()
+    with pytest.raises(ConfigError, match="ALT_TARGETS"):
+        StudioConfig(target="y", alt_targets=["y3"]).validate(["y", "y2"])

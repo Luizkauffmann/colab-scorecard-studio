@@ -206,8 +206,30 @@ def _as_binary(y: pd.Series) -> Optional[pd.Series]:
     return num.astype("int64")
 
 
+def prepare_alt_target(df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """An alternative target: 0/1 like the primary one, but rows with an unknown
+    outcome are kept (as missing) because they still belong to the other
+    targets' samples. They are left out of this target's binning and model."""
+    if target not in df.columns:
+        raise ConfigError([f"ALT_TARGETS column {target!r} not found."])
+    y = df[target]
+    known = y.notna()
+    y01 = _as_binary(y[known])
+    if y01 is None:
+        vals = sorted(map(str, pd.unique(y[known])))[:10]
+        raise ConfigError([f"ALT_TARGETS {target!r} must be 0/1 (1 = event), found values {vals}."])
+    if y01.nunique() < 2:
+        raise ConfigError([f"ALT_TARGETS {target!r} has a single class; nothing to model."])
+    df = df.copy()
+    out = pd.Series(np.nan, index=df.index, dtype="float64")
+    out.loc[known] = y01.to_numpy()
+    df[target] = out
+    return df, {"rows_known": int(known.sum()), "rows_unknown": int((~known).sum()),
+                "events": int(y01.sum()), "event_rate": float(y01.mean())}
+
+
 def apply_plausibility(df: pd.DataFrame, rules: Dict[str, Tuple[Optional[float], Optional[float]]],
-                       action: str = "special", code: float = -99999
+                       action: str = "special", code: float = -99999, allow_existing_code: bool = False
                        ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, List[Any]]]:
     """Find values outside ``[min, max]`` and treat them per ``action``.
 
@@ -223,12 +245,13 @@ def apply_plausibility(df: pd.DataFrame, rules: Dict[str, Tuple[Optional[float],
         # .copy(): without copy-on-write (pandas < 3), to_numeric can return a view,
         # and the replacement below would rewrite the values we report.
         x = pd.to_numeric(df[col], errors="coerce").copy()
-        below = (x < lo) if lo is not None else pd.Series(False, index=df.index)
-        above = (x > hi) if hi is not None else pd.Series(False, index=df.index)
+        coded = (x == code) if action == "special" else pd.Series(False, index=df.index)
+        below = ((x < lo) & ~coded) if lo is not None else pd.Series(False, index=df.index)
+        above = ((x > hi) & ~coded) if hi is not None else pd.Series(False, index=df.index)
         bad = (below | above).fillna(False)
         n_bad = int(bad.sum())
         if n_bad and action == "special":
-            if (x == code).any():
+            if coded.any() and not allow_existing_code:
                 raise ConfigError([f"IMPLAUSIBLE_CODE {code} already occurs in {col!r}; choose another."])
             df.loc[bad, col] = code
             new_specials[col] = [code]
@@ -270,6 +293,8 @@ def data_dictionary(df: pd.DataFrame, cfg: StudioConfig, id_col: str,
         s = df[c]
         if c == cfg.target:
             role = "target"
+        elif c in cfg.alt_targets:
+            role = "alternative target"
         elif c == id_col:
             role = "id"
         elif c == cfg.date_col:
@@ -320,6 +345,9 @@ def run_intake(cfg: StudioConfig, df: Optional[pd.DataFrame] = None) -> IntakeRe
     cfg.validate(df.columns)
 
     df, target_report = prepare_target(df, cfg.target, cfg.event_value)
+    alt_reports = {}
+    for t in cfg.alt_targets:
+        df, alt_reports[t] = prepare_alt_target(df, t)
     df, plaus, new_specials = apply_plausibility(df, cfg.plausibility, cfg.implausible_action,
                                                  cfg.implausible_code)
     special_codes = {k: list(v) for k, v in cfg.special_codes.items()}
@@ -343,6 +371,8 @@ def run_intake(cfg: StudioConfig, df: Optional[pd.DataFrame] = None) -> IntakeRe
         "exact_duplicate_rows": n_dup,
         "implausible_values": int((plaus["n_below"] + plaus["n_above"]).sum()) if len(plaus) else 0,
     }
+    if alt_reports:
+        report["alt_targets"] = alt_reports
     return IntakeResult(df=df, id_col=id_col, source=source, special_codes=special_codes,
                         dictionary=data_dictionary(df, cfg, id_col), plausibility=plaus,
                         report=report)

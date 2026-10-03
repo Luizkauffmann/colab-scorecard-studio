@@ -16,6 +16,8 @@ dependencies = [
     "optbinning>=0.19",
     # Serves the binning app inside Colab (preinstalled there).
     "flask>=2.2",
+    # Logistic regression with p-values and VIF (preinstalled in Colab).
+    "statsmodels>=0.14",
 ]
 
 [project.optional-dependencies]

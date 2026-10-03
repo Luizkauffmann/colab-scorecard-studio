@@ -43,6 +43,7 @@ class StudioConfig:
 
     data_source: Any = "demo:credit_risk"
     target: str = "loan_status"
+    alt_targets: List[str] = field(default_factory=list)
     id_col: Optional[str] = None
     date_col: Optional[str] = None
     preset: str = "credit_pd"
@@ -65,10 +66,22 @@ class StudioConfig:
     # ------------------------------------------------------------------
 
     def __post_init__(self):
+        self.alt_targets = list(self.alt_targets or [])
         self.exclude = list(self.exclude or [])
         self.force_include = list(self.force_include or [])
         self.special_codes = {k: list(v) for k, v in (self.special_codes or {}).items()}
         self.plausibility = {k: tuple(v) for k, v in (self.plausibility or {}).items()}
+
+    def plausibility_spec(self) -> Dict[str, Any]:
+        """The intake plausibility rules, in the form a :class:`Scorecard`
+        stores so new data is cleaned exactly like the modeling data."""
+        return {"rules": {k: list(v) for k, v in self.plausibility.items()},
+                "action": self.implausible_action, "code": self.implausible_code}
+
+    @property
+    def targets(self) -> List[str]:
+        """Primary target first, then the alternatives."""
+        return [self.target, *self.alt_targets]
 
     @property
     def preset_params(self) -> Dict[str, Any]:
@@ -114,6 +127,14 @@ class StudioConfig:
         both = sorted(set(self.exclude) & set(self.force_include))
         if both:
             problems.append(f"In both EXCLUDE and FORCE_INCLUDE: {both}. Pick one.")
+        if len(set(self.targets)) != len(self.targets):
+            problems.append(f"TARGET and ALT_TARGETS must be different columns: {self.targets}.")
+        for t in self.alt_targets:
+            if t in self.exclude or t in self.force_include:
+                problems.append(f"ALT_TARGETS {t!r} is a target; remove it from EXCLUDE/FORCE_INCLUDE "
+                                "(targets are never predictors).")
+            if t in (self.id_col, self.date_col):
+                problems.append(f"ALT_TARGETS {t!r} cannot also be ID_COL or DATE_COL.")
         roles = {"TARGET": self.target, "ID_COL": self.id_col, "DATE_COL": self.date_col}
         for name, col in roles.items():
             if col is not None and col in self.force_include:
@@ -134,6 +155,7 @@ class StudioConfig:
                     problems.append(f"{label}: column {n!r} not found{_suggest(n, cols)}.")
 
         check("TARGET", [self.target])
+        check("ALT_TARGETS", self.alt_targets)
         check("ID_COL", [self.id_col])
         check("DATE_COL", [self.date_col])
         check("EXCLUDE", self.exclude)

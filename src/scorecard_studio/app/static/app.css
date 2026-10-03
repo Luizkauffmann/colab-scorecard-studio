@@ -172,3 +172,6 @@ button:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
 #toast.error{background:#922b21}
 ::-webkit-scrollbar{width:6px;height:6px}
 ::-webkit-scrollbar-thumb{background:#d0d5dd;border-radius:3px}
+.muted{color:#888;font-size:11px}
+.target-wrap{margin-bottom:8px}
+.target-wrap select{font-weight:600}

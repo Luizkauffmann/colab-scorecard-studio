@@ -33,7 +33,7 @@ import io
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -255,6 +255,21 @@ def _borderline(iv: float, iv_min: float, iv_max: float, rel: float = 0.10) -> b
     estimate: a variable at 0.098 vs a 0.10 cutoff is not meaningfully weaker
     than one at 0.102."""
     return any(t > 0 and abs(iv - t) <= rel * t for t in (iv_min, iv_max))
+
+
+def target_sample(train: pd.DataFrame, target: str, all_targets: Iterable[str]) -> pd.DataFrame:
+    """Rows of ``train`` with a known ``target``, without the other target
+    columns (another outcome flag is never a predictor: it is leakage)."""
+    others = [t for t in all_targets if t != target and t in train.columns]
+    t = train.loc[train[target].notna()].drop(columns=others)
+    return t.assign(**{target: t[target].astype("int64")})
+
+
+def screen_all_targets(train: pd.DataFrame, targets: Sequence[str], **kwargs) -> Dict[str, "ScreeningResult"]:
+    """:func:`screen_variables` for each target (Train rows with a known
+    outcome, other targets removed). Returns ``{target: ScreeningResult}``."""
+    targets = list(targets)
+    return {t: screen_variables(target_sample(train, t, targets), t, **kwargs) for t in targets}
 
 
 def correlated_pairs(train: pd.DataFrame, table: pd.DataFrame,

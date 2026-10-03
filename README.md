@@ -5,9 +5,9 @@ interactive optimal binning, WOE, logistic regression, scorecard scaling, valida
 export. The flagship use case is the **application (onboarding) PD scorecard**, and the
 same framework works for fraud, AML and Kaggle-style binary classification.
 
-> **Status:** notebook sections 0–4 run end to end: setup, data intake, sample design,
-> univariate screening, and the interactive binning app with the model-ready dataset.
-> Modeling, scaling and validation come next.
+> **Status:** notebook sections 0–7 run end to end: setup, data intake, sample design,
+> univariate screening, the interactive binning app, logistic regression, the Siddiqi
+> scorecard and rescoring of new data. Bin-stability and full validation reports come next.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Luizkauffmann/colab-scorecard-studio/blob/m2-binning-app/notebooks/scorecard_studio.ipynb)
 
@@ -39,7 +39,12 @@ thread, served through Colab's own port proxy: no public tunnel). It is a port o
 * drag cutoffs on the variable's histogram, double-click to add one, type exact values
 * merge adjacent bins, split a bin at its median, regroup categories with chips
 * re-run optimal binning with other settings, or reset to the automatic result
-* Missing and Special are fixed bins; flags for empty, tiny, zero-event and non-monotonic bins
+* Missing and Special are their own bins by default; merging them into a regular bin (or
+  Special with Missing) is a modeling choice made in the bin table, applied identically by
+  `transform`, `scorer.py` and SQL
+* several candidate targets (`ALT_TARGETS`): a target selector, one set of bins per target,
+  and every target column excluded as a predictor for the others
+* flags for empty, tiny, zero-event and non-monotonic bins
 * every change is saved to Drive (`04_binning/binning_config.json`) and reloaded after a
   runtime reset when the Train sample is the same
 
@@ -55,6 +60,31 @@ app = launch_app(train, "loan_status", store=store, full=df, sample=sample,
 app.save_output()          # or the button in the app
 app.engine                 # the fitted BinningEngine
 ```
+
+## Model, scorecard, rescoring
+
+```python
+bundle = app.engine.build_scoring_bundle(output["variables"])
+model = ss.fit_logistic(model_df, "loan_status",
+                        {"person_income": "woe", "person_home_ownership": "bins", "loan_amnt": "raw"},
+                        bundle, selection="backward")        # fit on Train rows only
+model.summary, model.flags, model.performance                # p-values, VIF, signs, Gini/KS by sample
+
+card = ss.build_scorecard(model, bundle, ss.ScalingParams(pdo=20, base_score=600, base_odds=50),
+                          plausibility=cfg.plausibility_spec())
+card.table()                                                 # points per bin (Siddiqi)
+card.set_points("person_home_ownership", 1, 160)             # manual judgment, flagged in the table
+card.save("scorecard.json")
+
+ss.load_scorecard("scorecard.json").score(new_df)            # plausibility -> bins -> points -> score, pd
+```
+
+Each variable enters the model as `"woe"` (one coefficient, expected positive), `"bins"`
+(dummies, most populous bin as reference; a separate Missing bin is a missing flag) or `"raw"`
+(linear; refused when the variable has missing values or special codes). Points follow
+Siddiqi: Factor = PDO/ln2, Offset = Score − Factor·ln(Odds),
+points = −(β·WOE + α/n)·Factor + Offset/n. Before rounding, a record's points add up exactly to
+the model's score (tested).
 
 ## Quick start: intake, split, screening
 
@@ -117,9 +147,10 @@ bundle.save_sql("transform.sql", dialect="bigquery")      # standard | spark | b
 | Event | `target == 1` (default, fraud, SAR...) |
 | WOE | `ln(%events / %non-events)`. Positive WOE means riskier than average. |
 | Numerical bins | `(lower, upper]`. A value equal to a cutoff falls in the lower bin. |
-| Missing | Always its own bin (group `0`). If training has no missing values, its WOE is 0 and you get a warning. |
-| Special codes | Pooled into one Special bin (group `-1`) and excluded from the cutoff search. |
-| Unseen categories | Scored as Missing. |
+| Missing | Its own bin (group `0`) by default. If training has no missing values, its WOE is 0 and you get a warning. Can be merged into a regular bin (`missing_to`). |
+| Special codes | Pooled into one Special bin (group `-1`) and excluded from the cutoff search. Can be merged into a regular bin or combined with Missing (`special_to`). |
+| Merged Missing/Special | Scored with the target bin's group, WOE and label in `transform`, `scorer.py` and SQL. |
+| Unseen categories | Scored like Missing. |
 | Gini | `2 * AUC - 1`, computed from the binned WOE. |
 | `min_bin_size` | Share of **all** rows, including missing and special. |
 | Screening | On Train only, IV from an automatic fit with the preset's constraints. `credit_pd`: `IV_MIN` 0.10; fraud/AML/Kaggle: 0.02. `IV_MAX` 0.50 holds for review, never drops silently. |
@@ -152,7 +183,7 @@ pytest
 1. **Engine package**: done. Intake, sample design and screening (notebook sections 0–3): done
 2. Interactive binning app running inside Colab, with state saved to Google Drive: done
 3. Model-ready output dataset (`opt_` bins and `woe_` columns) for Train / Test / OOT: done; bin stability report next
-4. Variable selection, logistic regression, scorecard scaling
+4. Variable selection, logistic regression, scorecard scaling, rescoring: done
 5. Validation report and deployment exports
 6. Public template, sample datasets, walkthrough
 7. Medium article

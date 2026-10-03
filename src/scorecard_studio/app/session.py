@@ -36,6 +36,7 @@ import pandas as pd
 from ..binning import MISSING_GROUP, SPECIAL_GROUP, BinningEngine, BinningResult
 from ..dtypes import DEFAULT_MAX_CATEGORIES, detect_dtype, series_to_category_str
 from ..metrics import interpret_iv
+from ..scorecard import apply_bins
 
 APP_SCHEMA_VERSION = 1
 CONFIG_FILE = "binning_config.json"
@@ -201,11 +202,14 @@ class BinningSession:
             info = self._var(name)
             p = {**self.fit_params, **{k: v for k, v in params.items() if k in FIT_KEYS}}
             p = _clean_fit_params(p)
+            before = self.result(name)
             try:
                 self.engine.fit(name, dtype=info.dtype, **p)
             except Exception as exc:  # noqa: BLE001
                 raise AppError(f"Binning failed: {exc}") from exc
-            info.edited = p != _clean_fit_params(self.fit_params)
+            self._remap_fixed(name, before)
+            info.edited = p != _clean_fit_params(self.fit_params) or bool(
+                before.missing_to is not None or before.special_to is not None)
             return self._changed(name)
 
     def reset(self, name: str) -> Dict[str, Any]:
@@ -213,7 +217,9 @@ class BinningSession:
         with self.lock:
             info = self._var(name)
             try:
-                self.engine.fit(name, dtype=info.dtype, **self.fit_params)
+                r = self.engine.fit(name, dtype=info.dtype, **self.fit_params)
+                if r.missing_to is not None or r.special_to is not None:
+                    self.engine.set_fixed_bins(name)          # separate Missing / Special
             except Exception as exc:  # noqa: BLE001
                 raise AppError(f"Binning failed: {exc}") from exc
             info.edited = False
@@ -228,7 +234,9 @@ class BinningSession:
                 raise AppError("Cutoffs must be numbers.") from exc
             if any(not math.isfinite(c) for c in cuts):
                 raise AppError("Cutoffs must be finite.")
+            before = self.result(name)
             self.engine.adjust_cutoffs(name, cuts)
+            self._remap_fixed(name, before)
             self._var(name).edited = True
             return self._changed(name)
 
@@ -247,14 +255,21 @@ class BinningSession:
             return self.set_cutoffs(name, list(r.cutoffs) + [at])
 
     def merge(self, name: str, groups: Sequence[int]) -> Dict[str, Any]:
-        """Merge regular bins. Numerical: must be adjacent. Categorical: any."""
+        """Merge bins. Regular bins: adjacent for numerical, any for categorical.
+        Missing (0) / Special (-1) selected with regular bins are merged into
+        them; Missing + Special alone are combined into one bin."""
         with self.lock:
             r = self.result(name)
-            gs = sorted({int(g) for g in groups})
-            if len(gs) < 2:
+            sel = sorted({int(g) for g in groups})
+            if len(sel) < 2:
                 raise AppError("Select at least two bins to merge.")
+            fixed = [g for g in sel if g in (MISSING_GROUP, SPECIAL_GROUP)]
+            if fixed:
+                return self._merge_with_fixed(name, r, sel, fixed)
+            gs = sel
             for g in gs:
-                _regular_bin(r, g)  # Missing/Special cannot be merged
+                _regular_bin(r, g)
+            self._snapshot = r
             if r.dtype == "numerical":
                 if gs != list(range(gs[0], gs[-1] + 1)):
                     raise AppError("Only adjacent bins can be merged.")
@@ -266,6 +281,43 @@ class BinningSession:
                 for c in grp:
                     assignments[c] = gs[0] if i in gs else i
             return self.set_categories(name, assignments)
+
+    def _merge_with_fixed(self, name: str, r: BinningResult, sel: List[int], fixed: List[int]):
+        regular = [g for g in sel if g > 0]
+        for g in regular:
+            _regular_bin(r, g)
+        if SPECIAL_GROUP in fixed and not r.special_codes:
+            raise AppError(f"'{name}' has no Special bin.")
+        if not regular:  # Missing + Special only
+            return self.set_fixed(name, missing_to=r.missing_to, special_to=MISSING_GROUP)
+        if len(regular) > 1:
+            self.merge(name, regular)
+            r = self.result(name)
+            anchor = self._anchor_of(self._before_snapshot, regular[0])
+            dest = self._group_of(r, anchor)
+        else:
+            dest = regular[0]
+        return self.set_fixed(
+            name,
+            missing_to=dest if MISSING_GROUP in fixed else r.missing_to,
+            special_to=dest if SPECIAL_GROUP in fixed else r.special_to)
+
+    def set_fixed(self, name: str, missing_to: Any = "keep", special_to: Any = "keep") -> Dict[str, Any]:
+        """Treatment of Missing and Special (a modeling choice): ``None`` =
+        separate bin, ``k`` = merged into regular group ``k``; for Special,
+        ``0`` = combined with Missing. An argument left out keeps its current value."""
+        with self.lock:
+            cur = self.result(name)
+            if missing_to == "keep":
+                missing_to = cur.missing_to
+            if special_to == "keep":
+                special_to = cur.special_to
+            try:
+                self.engine.set_fixed_bins(name, missing_to=missing_to, special_to=special_to)
+            except ValueError as exc:
+                raise AppError(str(exc)) from exc
+            self._var(name).edited = True
+            return self._changed(name)
 
     def set_categories(self, name: str, assignments: Dict[str, int]) -> Dict[str, Any]:
         """Regroup a categorical variable: ``{category: group id}`` for every category."""
@@ -279,7 +331,9 @@ class BinningSession:
             unknown = sorted(set(got) - known)
             if unknown:
                 raise AppError(f"Unknown categories: {unknown[:10]}")
+            before = r
             self.engine.merge_categories(name, got)
+            self._remap_fixed(name, before)
             self._var(name).edited = True
             return self._changed(name)
 
@@ -392,14 +446,8 @@ class BinningSession:
                 cols[self.date_col] = base[self.date_col]
             for v in names:
                 self.result(v)
-                art = self.engine.get_scoring_artifact(v)
-                res = art.transform_series(base[v])
-                order, names_by_group = _ordered_labels(art)
-                cols[v] = base[v]
-                cols[f"opt_{v}"] = pd.Categorical([names_by_group[g] for g in res["group"]],
-                                                  categories=order, ordered=True)
-                cols[f"woe_{v}"] = res["woe"].astype("float64")
-            return pd.DataFrame(cols, index=base.index)
+            binned = apply_bins(base, self.engine.build_scoring_bundle(names), names)
+            return pd.concat([pd.DataFrame(cols, index=base.index), binned], axis=1)
 
     def save_output(self, variables: Optional[Iterable[str]] = None) -> Dict[str, Any]:
         """Build the output dataset and write it, the scoring bundle and the
@@ -453,6 +501,48 @@ class BinningSession:
     def _changed(self, name: str) -> Dict[str, Any]:
         self.save()
         return {"variable": self.variable_payload(name), "state": self.state()}
+
+    # Missing/Special stay attached to the *same* bin when bins are renumbered:
+    # a bin is identified by a value inside it (numerical: its upper bound;
+    # categorical: its first category), not by its group number.
+
+    @property
+    def _before_snapshot(self):
+        return getattr(self, "_snapshot", None)
+
+    @staticmethod
+    def _anchor_of(r: Optional[BinningResult], group: int):
+        if r is None:
+            return None
+        b = next((x for x in r.bins if x.kind == "regular" and x.group == group), None)
+        if b is None:
+            return None
+        if r.dtype == "numerical":
+            return math.inf if b.upper is None else b.upper
+        return b.categories[0] if b.categories else None
+
+    @staticmethod
+    def _group_of(r: BinningResult, anchor) -> Optional[int]:
+        if anchor is None:
+            return None
+        if r.dtype == "numerical":
+            return 1 + sum(1 for c in r.cutoffs if c < anchor)
+        for i, grp in enumerate(r.cat_groups or [], start=1):
+            if anchor in grp:
+                return i
+        return None
+
+    def _remap_fixed(self, name: str, before: BinningResult) -> None:
+        self._snapshot = before
+        after = self.result(name)
+        want_m = self._group_of(after, self._anchor_of(before, before.missing_to)) if before.missing_to else None
+        if before.special_to in (None, MISSING_GROUP):
+            want_s = before.special_to
+        else:
+            want_s = self._group_of(after, self._anchor_of(before, before.special_to))
+        if (want_m, want_s) != (after.missing_to, after.special_to):
+            self.engine.set_fixed_bins(name, missing_to=want_m,
+                                       special_to=want_s if after.special_codes else None)
 
     def _min_share(self, r: Optional[BinningResult]) -> float:
         if r is None:
@@ -545,7 +635,9 @@ def serialize_result(r: BinningResult) -> Dict[str, Any]:
             "count": b.count, "share": b.count / total, "event_count": b.event_count,
             "non_event_count": b.non_event_count, "event_rate": _num(b.event_rate),
             "woe": _num(b.woe), "iv_contribution": _num(b.iv_contribution),
+            "merged_into": b.merged_into,
         } for b in r.bins],
+        "missing_to": r.missing_to, "special_to": r.special_to,
     }
 
 
@@ -554,6 +646,8 @@ def _warnings(r: BinningResult, min_share: float) -> List[Dict[str, Any]]:
     flags = []
     total = sum(b.count for b in r.bins) or 1
     for b in r.bins:
+        if b.merged_into is not None:
+            continue
         if b.kind == "regular" and b.count == 0:
             flags.append({"group": b.group, "level": "error", "text": f"Bin '{b.label}' is empty."})
             continue
@@ -581,20 +675,6 @@ def _regular_bin(r: BinningResult, group: int):
                 raise AppError(f"'{b.label}' is a fixed bin; Missing and Special can't be merged or split.")
             return b
     raise AppError(f"No bin with group {group}.")
-
-
-def _ordered_labels(art):
-    """Unique display labels in bin order: regular groups, Special, Missing."""
-    table = art.regular + ([art.special] if art.special else []) + [art.missing]
-    seen, order, by_group = set(), [], {}
-    for b in table:
-        label = b["label"]
-        if label in seen:
-            label = f"{label} [group {b['group']}]"
-        seen.add(label)
-        order.append(label)
-        by_group[b["group"]] = label
-    return order, by_group
 
 
 def _clean_fit_params(p: Dict[str, Any]) -> Dict[str, Any]:

@@ -38,13 +38,19 @@ def test_notebook_runs_end_to_end(tmp_path):
     root = tmp_path / "runs" / runs[0]
     for f in ["00_config/config.json", "01_intake/raw.parquet", "01_intake/data_dictionary.csv",
               "02_split/split.parquet", "03_screening/shortlist.json",
-              "03_screening/screening_report.html", "04_binning/binning_config.json",
-              "04_binning/model_dataset.parquet", "04_binning/bundle.json"]:
+              "03_screening/screening_report.html", "04_binning/loan_status/binning_config.json",
+              "04_binning/loan_status/model_dataset.parquet", "04_binning/loan_status/bundle.json",
+              "05_model/coefficients.csv", "06_scorecard/scorecard.json",
+              "06_scorecard/scorecard_table.csv", "07_rescore/rescored.csv"]:
         assert (root / f).exists(), f
     shortlist = json.loads((root / "03_screening/shortlist.json").read_text())
     assert "loan_grade" in shortlist["dropped"] and shortlist["selected"]
     assert shortlist["dropped"]["loan_grade"]["status"] == "excluded"
     import pandas as pd
-    model = pd.read_parquet(root / "04_binning/model_dataset.parquet")
+    model = pd.read_parquet(root / "04_binning/loan_status/model_dataset.parquet")
     for v in shortlist["selected"]:
         assert {v, f"opt_{v}", f"woe_{v}"} <= set(model.columns)
+    import scorecard_studio as ss
+    card = ss.load_scorecard(str(root / "06_scorecard/scorecard.json"))
+    scored = card.score(pd.read_csv(csv))
+    assert scored["score"].notna().all() and (scored["score"] % 1 == 0).all()

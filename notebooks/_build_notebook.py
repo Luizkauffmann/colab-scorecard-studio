@@ -29,7 +29,10 @@ Every section writes its output to a versioned folder on your Google Drive (`sco
 | 2 | Sample design (Train / Test / OOT) | ✅ |
 | 3 | Univariate screening (Train only) | ✅ |
 | 4 | Interactive optimal binning (web app) and the model-ready dataset | ✅ |
-| 5–11 | Bin stability, selection, model, scaling, validation, export | coming |
+| 5 | Logistic regression (raw / bins / WOE per variable) | ✅ |
+| 6 | Scorecard (Siddiqi scaling), performance | ✅ |
+| 7 | Rescoring new data | ✅ |
+| – | Bin stability report, full validation report, deployment exports | coming |
 
 **Default data:** the Kaggle [Credit Risk Dataset](https://www.kaggle.com/datasets/laotse/credit-risk-dataset) (32,581 loans, target `loan_status`). It is *simulated* bureau-style data with a ~22% default rate, far above a real prime portfolio. It's good for learning the workflow, not for drawing conclusions about real lending.
 """)
@@ -70,13 +73,17 @@ md("""
 |---|---|
 | `DATA_SOURCE` | `"demo:credit_risk"` (default), `"demo:synthetic"` (has dates and an OOT period), `"upload"` (file picker), `"drive:folder/file.csv"` (path under *My Drive*), an `https://` URL, `"kaggle:owner/dataset"` (needs `KAGGLE_USERNAME` / `KAGGLE_KEY` in Colab *Secrets*), or a local path. CSV, Parquet, Excel and JSON are read by extension. |
 | `TARGET`, `EVENT_VALUE` | The outcome column. It must be 0/1 with **1 = event**. Otherwise set `EVENT_VALUE` to the value that means event (e.g. `"Charged Off"`). Rows with a missing target are dropped and counted. |
+| `ALT_TARGETS` | Other candidate targets (e.g. a 24-month default flag). Each gets its own screening, bins and output; the binning app has a target selector. Every target column is excluded as a predictor for the others. |
 | `ID_COL`, `DATE_COL` | Optional. With a date, the most recent period becomes an out-of-time (OOT) sample. |
 | `PRESET` | `credit_pd`, `fraud`, `aml` or `kaggle`: binning constraints and screening defaults per domain. |
 | `EXCLUDE` | Columns that must not enter the model. **Type the names.** They're still profiled, so you can see what you gave up. |
 | `FORCE_INCLUDE` | Columns kept whatever their IV (policy variables, or high-IV variables you have reviewed). |
 | `IV_MIN`, `IV_MAX` | Screening thresholds on Information Value. `None` uses the preset (credit PD: 0.10 / 0.50). |
 | `SPECIAL_CODES` | Values with a meaning of their own, e.g. `{"months_since_delinq": [-999]}`. They get a separate Special bin. |
-| `PLAUSIBILITY` | `{column: (min, max)}`. Values outside are data errors, routed per `IMPLAUSIBLE_ACTION`: `"special"` (to the Special bin), `"missing"` or `"flag"` (report only). |
+| `PLAUSIBILITY` | `{column: (min, max)}`. Values outside are data errors, routed per `IMPLAUSIBLE_ACTION`: `"special"` (to the Special bin), `"missing"` or `"flag"` (report only). The scorecard stores these rules and applies them when rescoring new data. |
+| `REPRESENTATION_DEFAULT`, `REPRESENTATION` | How each variable enters the logistic regression: `"woe"`, `"bins"` (dummies) or `"raw"`. |
+| `SELECTION`, `P_MAX`, `KEEP_IN_MODEL` | `"none"` or `"backward"` elimination (wrong-sign WOE first, then p-value > `P_MAX`); `KEEP_IN_MODEL` is never removed. |
+| `PDO`, `BASE_SCORE`, `BASE_ODDS`, `BASE_POINTS` | Scorecard scaling: `BASE_SCORE` points at `BASE_ODDS`:1 good:bad odds, `PDO` points to double the odds. `BASE_POINTS`: `"spread"` over variables or `"separate"` row. |
 
 **Switching to your own data:** change `DATA_SOURCE` and `TARGET`, and empty `EXCLUDE`, `FORCE_INCLUDE` and `PLAUSIBILITY` (they name the demo's columns). A name that isn't in your data stops the run with a *did you mean* suggestion.
 """)
@@ -84,6 +91,7 @@ code("""
 # ── Data ────────────────────────────────────────────────────────────────
 DATA_SOURCE = "demo:credit_risk"
 TARGET      = "loan_status"        # 1 = event (default)
+ALT_TARGETS = []                   # other candidate targets, e.g. ["default_24m"]
 EVENT_VALUE = None
 ID_COL      = None                 # None: a row_id is generated
 DATE_COL    = None                 # None: stratified random split, no OOT
@@ -116,12 +124,25 @@ OOT_START = None        # e.g. "2024-07-01"; None = last OOT_SHARE of rows by da
 OOT_SHARE = 0.20
 SEED = 42
 
+# ── Model (section 5) ───────────────────────────────────────────────────
+REPRESENTATION_DEFAULT = "woe"     # "woe" | "bins" | "raw" for every variable...
+REPRESENTATION = {}                # ...except these, e.g. {"person_home_ownership": "bins"}
+SELECTION = "backward"             # "none" | "backward"
+P_MAX = 0.05
+KEEP_IN_MODEL = []                 # never removed by backward selection
+
+# ── Scorecard (section 6) ───────────────────────────────────────────────
+PDO = 20                # points to double the good:bad odds
+BASE_SCORE = 600        # score at BASE_ODDS
+BASE_ODDS = 50          # good:bad odds at BASE_SCORE (50:1)
+BASE_POINTS = "spread"  # "spread" over the variables (Siddiqi) or "separate"
+
 # ── Outputs ─────────────────────────────────────────────────────────────
 OUTPUT_DIR = "/content/drive/MyDrive/scorecard_studio"
 """)
 code("""
 cfg = ss.StudioConfig(
-    data_source=DATA_SOURCE, target=TARGET, event_value=EVENT_VALUE, id_col=ID_COL, date_col=DATE_COL,
+    data_source=DATA_SOURCE, target=TARGET, alt_targets=ALT_TARGETS, event_value=EVENT_VALUE, id_col=ID_COL, date_col=DATE_COL,
     preset=PRESET, exclude=EXCLUDE, force_include=FORCE_INCLUDE, iv_min=IV_MIN, iv_max=IV_MAX,
     special_codes=SPECIAL_CODES, plausibility=PLAUSIBILITY, implausible_action=IMPLAUSIBLE_ACTION,
     test_size=TEST_SIZE, oot_start=OOT_START, oot_share=OOT_SHARE, corr_threshold=CORR_THRESHOLD,
@@ -219,11 +240,15 @@ md("""
 **Check before moving on:** nothing is left in `review`, borderline variables have a deliberate decision, the event-rate plots make business sense (more debt relative to income → more defaults), and the correlated pairs below don't surprise you.
 """)
 code("""
-screen = ss.screen_variables(
-    train, cfg.target, iv_min=cfg.resolved_iv_min, iv_max=cfg.resolved_iv_max,
+# One screening per target (Train rows with a known outcome; other targets are never predictors).
+screens = ss.screen_all_targets(
+    train, cfg.targets, iv_min=cfg.resolved_iv_min, iv_max=cfg.resolved_iv_max,
     fit_params=cfg.fit_params, exclude=cfg.exclude, force_include=cfg.force_include,
     special_codes=intake.special_codes, id_col=ID, date_col=cfg.date_col,
     corr_threshold=cfg.corr_threshold)
+screen = screens[cfg.target]
+for t in cfg.alt_targets:
+    print(f"[{t}] shortlist:", screens[t].selected)
 
 print("Status:", screen.status_counts().to_dict())
 borderline = screen.table.loc[screen.table["reason"].str.contains("borderline"), "variable"].tolist()
@@ -277,8 +302,9 @@ md("""
 * **Categorical:** in *Group categories*, select chips, then **← Move here** on the target group and **Apply grouping**. Each chip shows that category's event rate and count.
 * **Re-run optimal binning** with other settings (max bins, monotonic trend, minimum bin size or events), or **Reset to auto**.
 * The checkbox next to each variable decides whether it goes into the output dataset. *Show other candidates* lets you add back a `low_iv` variable. `review` and `excluded` stay decisions for the config cell.
+* With `ALT_TARGETS`, the **Target** selector at the top left switches between targets. Each one has its own bins, WOE and output file.
 
-**Missing** and **Special** are fixed bins: they're never merged into regular bins, so the way they're scored can't change silently between fitting and deployment.
+**Missing and Special are a modeling choice.** By default each is its own bin. Use the dropdown on their rows (or select them together with a bin and **Merge**) to merge Missing into a regular bin, Special into a bin, or Special with Missing. The merged bin's WOE is computed on all its rows, and the exported scoring code follows the same choice. A separate Missing bin is the classic choice when "no value" carries information: with the *bins* representation it becomes its own dummy, i.e. a missing flag. Merge it when it is small or behaves like one of the bins.
 
 **Why by hand:** optimal binning maximises IV under constraints. It doesn't know that a cutoff at 25,000 is a policy line, that a WOE reversal between two neighbouring bins is noise, or that two categories belong together for business reasons. Bins that a person can explain are bins a validator will accept and that stay stable in production.
 
@@ -288,15 +314,15 @@ md("""
 * WOE moves in one direction for ordinal variables (the *Monotonic* box), or the shape has a business explanation.
 * Missing and Special behave plausibly. A Special bin built from three rows has a WOE you shouldn't trust.
 
-Every change is saved to `04_binning/binning_config.json` on Drive. After a runtime reset, re-run the notebook: this cell reloads your bins, as long as the Train sample is the same (same data, `SEED` and split settings).
+Every change is saved to `04_binning/<target>/binning_config.json` on Drive. After a runtime reset, re-run the notebook: this cell reloads your bins, as long as the Train sample is the same (same data, `SEED` and split settings).
 
 If the app doesn't appear (some corporate browsers block the embedded frame), run `app.open_in_tab()` in a new cell.
 """)
 code("""
 app = launch_app(
-    train, cfg.target, store=store,
+    train, cfg.target, alt_targets=cfg.alt_targets, screens=screens, store=store,
     full=df, sample=sample, id_col=ID, date_col=cfg.date_col,
-    screen=screen, special_codes=intake.special_codes, fit_params=cfg.fit_params)
+    special_codes=intake.special_codes, fit_params=cfg.fit_params)
 """)
 
 md("""
@@ -312,7 +338,7 @@ When the bins look right, click **Create output dataset** in the app, or run the
 
 The bins are fit on Train only, and Test and OOT receive the same bins and WOE values, through the same scoring code that the exported `scorer.py` and SQL use. At the modeling step you choose, per variable, whether the logistic regression uses the original value, the bins (as dummies) or the WOE.
 
-Also written to `04_binning/`: `bundle.json` (the scoring rules) and `binning_tables.csv` (every bin of every variable, for the model documentation).
+Also written to `04_binning/<target>/`: `bundle.json` (the scoring rules) and `binning_tables.csv` (every bin of every variable, for the model documentation). With `ALT_TARGETS`, `app.save_output(target="...")` writes the dataset for another target.
 """)
 code("""
 output = app.save_output()
@@ -323,6 +349,113 @@ display(model_df.head())
 """)
 code("""
 display(app.session.binning_tables())
+""")
+
+md("""
+## 5. Logistic regression
+
+**What it does:** fits a logistic regression of the target on the selected variables, on the **Train** rows of the model-ready dataset. Test (and OOT) are only scored.
+
+**How each variable enters the model** (`REPRESENTATION_DEFAULT`, overridden per variable in `REPRESENTATION`):
+
+| Representation | Columns | When to use it |
+|---|---|---|
+| `"woe"` | `woe_<var>`: one coefficient | The classic scorecard. One parameter per variable, monotonic by construction, robust with few events. The coefficient should be **positive** (positive WOE = riskier). |
+| `"bins"` | one dummy per bin of `opt_<var>` (the most populous bin is the reference) | When the bins' effect isn't proportional to their WOE once other variables are in. A separate Missing bin becomes a missing flag. Costs one parameter per bin. |
+| `"raw"` | the original value | Linear effects you trust. Not allowed when the variable has missing values or special codes (a linear term would treat −99999 as a number). It gives a points *formula*, not a points table. |
+
+**Selection:** with `SELECTION = "backward"`, variables are removed one at a time, first any WOE variable with a non-positive coefficient (its effect is reversed by the others), then the least significant above `P_MAX` (joint Wald test for bins). `KEEP_IN_MODEL` protects policy variables.
+
+**Check before moving on:** no flags you can't explain (sign, p-value, VIF > 5, correlated pairs), Gini on Test close to Train (a large drop means overfitting), and every variable has a business story.
+""")
+code("""
+bundle = app.engine.build_scoring_bundle(output["variables"])
+representations = {v: REPRESENTATION.get(v, REPRESENTATION_DEFAULT) for v in output["variables"]}
+model = ss.fit_logistic(model_df, cfg.target, representations, bundle,
+                        selection=SELECTION, p_max=P_MAX, keep=KEEP_IN_MODEL)
+
+for step in model.selection_log:
+    print("•", step)
+print("Flags:" if model.flags else "No flags.")
+for f in model.flags:
+    print("⚠", f)
+display(model.summary.style.format({"Coefficient": "{:.4g}", "p-value": "{:.3g}", "Max VIF": "{:.2f}", "IV": "{:.3f}"}, na_rep="—"))
+display(model.performance.style.format({"event_rate": "{:.2%}", "AUC": "{:.3f}", "Gini": "{:.3f}", "KS": "{:.3f}"}))
+""")
+code("""
+display(model.coefficients.style.format({"Coefficient": "{:.4g}", "Std. error": "{:.3g}", "z": "{:.2f}",
+                                          "p-value": "{:.3g}", "VIF": "{:.2f}"}, na_rep="—"))
+store.write_frame("model", "coefficients.csv", model.coefficients)
+store.write_frame("model", "summary.csv", model.summary)
+store.write_frame("model", "performance.csv", model.performance)
+store.write_json("model", "model.json", {"representations": model.representations, "intercept": model.intercept,
+                                         "coef": model.coef, "bin_coefs": model.bin_coefs,
+                                         "reference": model.reference, "flags": model.flags,
+                                         "selection_log": model.selection_log})
+""")
+
+md("""
+## 6. Scorecard
+
+**What it does:** turns the model into points with Siddiqi's scaling (*Credit Risk Scorecards*, the same formula as optbinning's `pdo_odds` method):
+
+* Factor = PDO / ln(2), Offset = BASE_SCORE − Factor · ln(BASE_ODDS)
+* Score = Offset − Factor · logit(PD): higher score = lower risk, and every `PDO` points double the good:bad odds.
+* Points per bin = −(β · WOE + α / n) · Factor + Offset / n for WOE variables (β of the bin's dummy for bins variables). The intercept α and the offset are spread evenly over the n variables, or put into one base-points row with `BASE_POINTS = "separate"`.
+
+Points are rounded to integers. Before rounding, a record's points add up exactly to the model's score. That property is tested, so the scorecard *is* the model.
+
+**Manual judgment:** `card.set_points(variable, group, points)` overrides a bin's points (the table keeps the model's value in *Model points* and flags *Manual*). Rescoring uses the edited points. A separate points-adjustment app will build on this.
+
+**Check before moving on:** points move in the expected direction across each variable's bins, no single variable dominates the score range, and the event rate falls steadily across score bands on Test as well as Train.
+""")
+code("""
+scaling = ss.ScalingParams(pdo=PDO, base_score=BASE_SCORE, base_odds=BASE_ODDS)
+card = ss.build_scorecard(model, bundle, scaling, base_points=BASE_POINTS,
+                          plausibility=cfg.plausibility_spec())
+print(f"Factor {scaling.factor:.4f} · Offset {scaling.offset:.4f}")
+display(card.table())
+""")
+code("""
+scored = card.score(df, keep=[ID, cfg.target])
+scored["sample"] = sample.values
+display(ss.performance(scored[cfg.target], scored["score"], scored["sample"])
+        .style.format({"event_rate": "{:.2%}", "AUC": "{:.3f}", "Gini": "{:.3f}", "KS": "{:.3f}"}))
+display(ss.score_bands(scored[cfg.target], scored["score"], scored["sample"]))
+
+card_path = card.save(store.path("scorecard", "scorecard.json"))
+store.write_frame("scorecard", "scorecard_table.csv", card.table())
+store.write_frame("scorecard", "scored.parquet", scored)
+print("Scorecard saved to", card_path)
+""")
+
+md("""
+## 7. Rescoring new data
+
+`scorecard.json` holds the whole scoring logic: the plausibility rules, the bins of every variable (including your Missing/Special choices), the representation and the points. Any table with the same raw columns can be rescored from it, in this notebook or anywhere `scorecard_studio` is installed:
+
+```python
+card = ss.load_scorecard("…/06_scorecard/scorecard.json")
+scores = card.score(new_df, keep=["application_id"])   # pts_<var>, score, pd
+```
+
+For the bins and WOE only (e.g. to feed another model), use `ss.apply_bins(new_df, bundle)` with the `bundle.json` from section 4. It gives the same `opt_<var>` / `woe_<var>` columns as the model-ready dataset.
+
+Set `NEW_DATA` below to a file (same options as `DATA_SOURCE`, e.g. `"upload"` or `"drive:folder/new_apps.csv"`). Left as `None`, the cell rescores the first rows of the demo data, so you can see the output.
+""")
+code("""
+NEW_DATA = None   # e.g. "upload" or "drive:folder/new_applications.csv"
+
+if NEW_DATA:
+    new_df, source = ss.load_table(NEW_DATA)
+else:
+    new_df, source = ss.load_table(cfg.data_source)
+    new_df = new_df.head(1000)
+reloaded = ss.load_scorecard(card_path)
+rescored = reloaded.score(new_df)
+out_path = store.write_frame("rescore", "rescored.csv", pd.concat([new_df, rescored], axis=1))
+print(f"Rescored {len(rescored):,} rows from {source} -> {out_path}")
+display(pd.concat([new_df, rescored], axis=1).head())
 """)
 
 nb = nbf.v4.new_notebook(cells=cells, metadata={
