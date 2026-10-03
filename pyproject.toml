@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scorecard-studio"
+version = "0.1.0"
+description = "Optimal binning, WOE and scorecard engine for binary-target models (credit PD, fraud, AML, Kaggle), built for Google Colab."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Luiz Kauffmann" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "optbinning>=0.19",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/Luizkauffmann/colab-scorecard-studio"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    # optbinning imports cvxpy, which may warn about optional solvers it cannot load
+    "ignore::UserWarning:cvxpy.*",
+]
