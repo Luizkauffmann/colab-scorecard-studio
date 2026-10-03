@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scorecard Binning</title>
+<link rel="stylesheet" href="static/app.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- Boundary editor -->
+<div id="thresholdModal" class="modal-overlay" style="display:none">
+  <div class="modal" role="dialog" aria-labelledby="modalTitle">
+    <h3 id="modalTitle">Edit boundary between bin <span id="modalGrpA"></span> and bin <span id="modalGrpB"></span></h3>
+    <label for="modalThreshInput">Upper limit of bin <span id="modalGrpA2"></span> (values ≤ this go left)</label>
+    <input type="number" id="modalThreshInput" step="any">
+    <div class="modal-note">Current: <b id="modalCurrentVal"></b> · allowed: <b id="modalRange"></b></div>
+    <div class="modal-actions">
+      <button class="danger" id="modalRemove" title="Merge the two bins">Remove boundary</button>
+      <span style="flex:1"></span>
+      <button id="modalCancel">Cancel</button>
+      <button class="primary" id="modalApply">Apply</button>
+    </div>
+  </div>
+</div>
+
+<div class="shell">
+
+  <!-- ══════ SIDEBAR ══════ -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="app-logo">
+        <div class="logo-icon">SB</div>
+        <div>
+          <div class="logo-title">Scorecard Binning</div>
+          <div class="logo-sub">Train sample · autosaved to Drive</div>
+        </div>
+      </div>
+      <div id="targetWrap" class="target-wrap" style="display:none">
+        <label for="targetSel">Target</label>
+        <select id="targetSel"></select>
+        <div class="sidebar-hint">Each target has its own bins, WOE and output file.</div>
+      </div>
+      <div id="dsStats"></div>
+    </div>
+
+    <div class="sidebar-body">
+      <div class="section-label">In the output dataset <span id="nIncluded" class="count-pill"></span></div>
+      <div id="varListIn"></div>
+      <button class="link-btn" id="toggleOthers">Show other candidates ▾</button>
+      <div id="othersWrap" style="display:none">
+        <div class="section-label" style="margin-top:8px">Other candidates</div>
+        <div class="sidebar-hint">Tick a <b>low IV</b> variable to add it back. <b>review</b> and <b>excluded</b> are decided in the config cell.</div>
+        <div id="varListOut"></div>
+      </div>
+    </div>
+
+    <div class="sidebar-footer">
+      <div id="saveStatus" class="save-status">Not saved yet</div>
+      <button class="success" id="btnOutput" style="width:100%">Create output dataset</button>
+      <div id="outputInfo" class="output-info" style="display:none"></div>
+    </div>
+  </aside>
+
+  <!-- ══════ MAIN ══════ -->
+  <main class="main">
+    <div class="toolbar">
+      <div class="var-title">
+        <div id="varName" class="var-name">Select a variable</div>
+        <div id="varPills"></div>
+      </div>
+      <label class="include-toggle" title="Include this variable in the output dataset">
+        <input type="checkbox" id="curIncluded"> in output
+      </label>
+      <div class="tb-sep"></div>
+      <div class="tb-field" style="width:92px">
+        <label for="binSlider">Max bins <b id="binLbl">6</b></label>
+        <input type="range" id="binSlider" min="2" max="15" value="6">
+      </div>
+      <div class="tb-field" id="monoWrap">
+        <label for="monoSel">Monotonic WOE</label>
+        <select id="monoSel">
+          <option value="auto">Auto</option>
+          <option value="increasing">↑ Increasing</option>
+          <option value="decreasing">↓ Decreasing</option>
+          <option value="none">None</option>
+        </select>
+      </div>
+      <div class="tb-field" style="width:78px">
+        <label for="minSize">Min bin %</label>
+        <input type="number" id="minSize" min="0" max="50" step="0.5">
+      </div>
+      <div class="tb-field" style="width:86px">
+        <label for="minEvents">Min events</label>
+        <input type="number" id="minEvents" min="0" step="1" placeholder="none">
+      </div>
+      <div class="tb-field" id="catCutWrap" style="width:92px;display:none">
+        <label for="catCut">Rare category %</label>
+        <input type="number" id="catCut" min="0" max="50" step="0.5">
+      </div>
+      <div class="tb-sep"></div>
+      <button class="primary" id="btnFit">Re-run optimal binning</button>
+      <button id="btnReset" title="Automatic binning with the preset settings">Reset to auto</button>
+    </div>
+
+    <div id="panelBinning" class="content">
+      <div id="emptyState" class="card empty-state">
+        Pick a variable on the left. Each one starts from the automatic optimal binning
+        used at screening; edit it here and every change is saved.
+      </div>
+
+      <div id="varContent" style="display:none">
+        <div class="card">
+          <div class="metrics-row">
+            <div class="mbox"><div class="mval" id="mIV">—</div><div class="mlbl">IV</div></div>
+            <div class="mbox"><div class="mval" id="mGini">—</div><div class="mlbl">Gini</div></div>
+            <div class="mbox"><div class="mval" id="mKS">—</div><div class="mlbl">KS</div></div>
+            <div class="mbox"><div class="mval" id="mBins">—</div><div class="mlbl">Bins</div></div>
+            <div class="mbox"><div class="mval" id="mMono">—</div><div class="mlbl">Monotonic</div></div>
+            <span id="ivInterp" class="iv-interp"></span>
+            <span id="screenIV" class="screen-iv"></span>
+          </div>
+          <ul id="flags" class="flags"></ul>
+        </div>
+
+        <div class="charts-grid">
+          <div class="card">
+            <div class="card-label">
+              <span id="leftChartTitle">Distribution and cutoffs</span>
+              <span id="dragHint" class="drag-hint">drag a red line · double-click to add a cutoff · click a line to type a value</span>
+            </div>
+            <div class="chart-outer" id="chartOuter">
+              <div class="chart-wrap"><canvas id="countChart"></canvas></div>
+              <div id="cutLines"></div>
+              <div id="cutTip" class="cut-tip"></div>
+            </div>
+            <div id="histNote" class="hist-note"></div>
+          </div>
+          <div class="card">
+            <div class="card-label">WOE (bars) and event rate (line) by bin</div>
+            <div class="chart-wrap"><canvas id="woeChart"></canvas></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="tabs">
+            <button class="tab-btn active" id="tabStats">Bins</button>
+            <button class="tab-btn" id="tabCat" style="display:none">Group categories</button>
+          </div>
+          <div class="bin-toolbar" id="binToolbar">
+            <span class="bin-toolbar-hint" id="binHint"></span>
+          </div>
+          <div id="panelStats" style="overflow-x:auto">
+            <table class="btable">
+              <thead><tr>
+                <th style="width:26px"></th><th>Bin</th><th>Range / categories</th>
+                <th class="r">Count</th><th class="r">Share</th><th class="r">Events</th>
+                <th class="r">Event rate</th><th class="r">WOE</th><th class="r">IV contrib.</th>
+                <th>Trend</th><th></th>
+              </tr></thead>
+              <tbody id="binTbody"></tbody>
+            </table>
+          </div>
+          <div id="panelCat" style="display:none">
+            <div class="cat-help">
+              <span>Click chips to select (Ctrl/⌘/Shift for several), then <b>← Move here</b> on the target group. Chips show the category's event rate and count.</span>
+              <span style="display:flex;gap:5px">
+                <button id="btnAddGroup">+ New group</button>
+                <button id="btnApplyGroups" class="primary">Apply grouping</button>
+              </span>
+            </div>
+            <div id="catGroupsUI" class="cat-area"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="busy" class="busy" style="display:none"><div class="busy-spinner"></div><div id="busyMsg">Working…</div></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="static/app.js"></script>
+</body>
+</html>

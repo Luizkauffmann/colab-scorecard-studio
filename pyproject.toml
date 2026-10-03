@@ -14,16 +14,27 @@ dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
     "optbinning>=0.19",
+    # Serves the binning app inside Colab (preinstalled there).
+    "flask>=2.2",
+    # Logistic regression with p-values and VIF (preinstalled in Colab).
+    "statsmodels>=0.14",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "matplotlib>=3.7", "pyarrow>=12", "nbformat>=5", "nbclient>=0.7", "ipykernel>=6"]
+# Preinstalled in Colab; needed for plots, Parquet outputs and the OpenML fallback.
+notebook = ["matplotlib>=3.7", "pyarrow>=12", "scikit-learn>=1.2"]
 
 [project.urls]
 Homepage = "https://github.com/Luizkauffmann/colab-scorecard-studio"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# The default demo dataset ships with the package, so the template runs
+# without a Kaggle account.
+scorecard_studio = ["data/*.csv.gz", "app/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -13,7 +13,14 @@ Bin conventions
   no missing values its WOE is 0 (neutral) and a warning is raised.
 * ``SPECIAL_GROUP`` (-1) pools all configured special codes (e.g. -999 =
   "no bureau record"). It exists only when special codes are configured.
-* Unseen categories at scoring time are mapped to the Missing bin.
+* Missing and Special are separate bins by default. As a modeling choice
+  either can be merged into a regular bin (``missing_to`` / ``special_to`` =
+  its group number), and Special can be combined with Missing
+  (``special_to=MISSING_GROUP``). A merged bin's WOE is computed on the
+  combined rows. The merged Missing/Special entry stays in the scoring rules
+  with the target bin's group, WOE and label, so ``transform``, ``scorer.py``
+  and SQL apply the choice identically.
+* Unseen categories at scoring time are scored like Missing.
 * WOE = ln(%events / %non-events): positive WOE = riskier than average.
 
 Bins are always fitted on the data passed to :class:`BinningEngine` (your
@@ -85,6 +92,7 @@ class BinStats:
     event_rate: float
     woe: float
     iv_contribution: float
+    merged_into: Optional[int] = None  # Missing/Special merged into this group
 
 
 @dataclass
@@ -103,6 +111,8 @@ class BinningResult:
     monotonic_direction: Optional[str]
     settings: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    missing_to: Optional[int] = None   # None = own Missing bin; k = merged into group k
+    special_to: Optional[int] = None   # None = own Special bin; k = group k; 0 = with Missing
 
     @property
     def divergence(self) -> str:
@@ -132,6 +142,7 @@ class BinningResult:
             "Event rate": round(b.event_rate, 4),
             "WOE": round(b.woe, 4),
             "IV contribution": round(b.iv_contribution, 4),
+            "Merged into": b.merged_into,
         } for b in self.bins])
 
 
@@ -264,8 +275,10 @@ class BinningEngine:
             params["monotonic_trend"] = MONOTONIC_MAP[monotonic]
             optb = OptimalBinning(**params)
             optb.fit(x_clean, y_clean)
+            _check_solver_status(variable, optb, settings)
             cutoffs = sorted(float(c) for c in np.asarray(optb.splits).ravel())
-            result = self._build(variable, dtype, cutoffs=cutoffs, specials=specials, settings=settings)
+            result = self._build(variable, dtype, cutoffs=cutoffs, specials=specials, settings=settings,
+                                 **self._carry_fixed(variable, len(cutoffs) + 1, specials))
             if monotonic != "none" and not result.is_monotonic:
                 result.warnings.append(
                     f"Monotonic trend '{monotonic}' requested but the WOE is not monotonic "
@@ -276,12 +289,14 @@ class BinningEngine:
                 params["cat_cutoff"] = float(cat_cutoff)
             optb = OptimalBinning(**params)
             optb.fit(x_clean, y_clean)
+            _check_solver_status(variable, optb, settings)
             groups = [[str(c) for c in g] for g in (optb.splits or []) if len(g) > 0]
             seen = {c for g in groups for c in g}
             leftovers = sorted(set(x_clean) - seen)
             if leftovers:  # never silently drop a training category
                 groups.append(leftovers)
-            result = self._build(variable, dtype, cat_groups=groups, specials=specials, settings=settings)
+            result = self._build(variable, dtype, cat_groups=groups, specials=specials, settings=settings,
+                                 **self._carry_fixed(variable, len(groups), specials))
 
         self._results[variable] = result
         self.fit_errors.pop(variable, None)
@@ -318,7 +333,8 @@ class BinningEngine:
             raise ValueError("Cutoffs must be finite numbers.")
         cuts = sorted(set(cuts))
         result = self._build(variable, "numerical", cutoffs=cuts,
-                             specials=prev.special_codes, settings=prev.settings)
+                             specials=prev.special_codes, settings=prev.settings,
+                             **self._carry_fixed(variable, len(cuts) + 1, prev.special_codes))
         self._results[variable] = result
         return result
 
@@ -338,7 +354,25 @@ class BinningEngine:
             by_gid.setdefault(int(gid), []).append(str(cat))
         groups = [sorted(by_gid[k]) for k in sorted(by_gid)]
         result = self._build(variable, "categorical", cat_groups=groups,
-                             specials=prev.special_codes, settings=prev.settings)
+                             specials=prev.special_codes, settings=prev.settings,
+                             **self._carry_fixed(variable, len(groups), prev.special_codes))
+        self._results[variable] = result
+        return result
+
+    def set_fixed_bins(self, variable: str, missing_to: Optional[int] = None,
+                       special_to: Optional[int] = None) -> BinningResult:
+        """Choose how Missing and Special are treated (a modeling decision).
+
+        ``missing_to``: ``None`` keeps a separate Missing bin; ``k`` merges
+        missing values into regular group ``k``.
+        ``special_to``: ``None`` keeps a separate Special bin; ``k`` merges
+        special codes into group ``k``; ``MISSING_GROUP`` (0) combines them
+        with Missing (and follows Missing if that is merged too).
+        """
+        prev = self._require(variable)
+        result = self._build(variable, prev.dtype, cutoffs=prev.cutoffs, cat_groups=prev.cat_groups,
+                             specials=prev.special_codes, settings=prev.settings,
+                             missing_to=missing_to, special_to=special_to)
         self._results[variable] = result
         return result
 
@@ -404,6 +438,8 @@ class BinningEngine:
                     "cat_groups": r.cat_groups,
                     "special_codes": _json_safe_list(r.special_codes),
                     "settings": r.settings,
+                    "missing_to": r.missing_to,
+                    "special_to": r.special_to,
                 } for v, r in self._results.items()
             },
         }
@@ -421,7 +457,8 @@ class BinningEngine:
             self._results[v] = self._build(
                 v, cfg["dtype"], cutoffs=cfg.get("cutoffs") or [],
                 cat_groups=cfg.get("cat_groups"), specials=cfg.get("special_codes") or [],
-                settings=cfg.get("settings") or {})
+                settings=cfg.get("settings") or {},
+                missing_to=cfg.get("missing_to"), special_to=cfg.get("special_to"))
         return skipped
 
     # ------------------------------------------------------------------
@@ -439,6 +476,20 @@ class BinningEngine:
             raise ValueError(f"'{variable}' not fitted yet.")
         return self._results[variable]
 
+    def _carry_fixed(self, variable: str, n_regular: int, specials: Sequence[Any]) -> Dict[str, Any]:
+        """Keep the previous Missing/Special treatment when it is still valid
+        for ``n_regular`` bins. Callers that renumber bins remap it themselves."""
+        prev = self._results.get(variable)
+        if prev is None:
+            return {}
+        out: Dict[str, Any] = {}
+        if prev.missing_to is not None and 1 <= prev.missing_to <= n_regular:
+            out["missing_to"] = prev.missing_to
+        if specials and prev.special_to is not None and (
+                prev.special_to == MISSING_GROUP or 1 <= prev.special_to <= n_regular):
+            out["special_to"] = prev.special_to
+        return out
+
     @staticmethod
     def _masks(x_raw: pd.Series, dtype: str, specials: Sequence[Any]):
         missing = x_raw.isna().to_numpy()
@@ -455,7 +506,8 @@ class BinningEngine:
 
     def _build(self, variable: str, dtype: str, *, cutoffs: Sequence[float] = (),
                cat_groups: Optional[List[List[str]]] = None,
-               specials: Sequence[Any] = (), settings: Optional[dict] = None) -> BinningResult:
+               specials: Sequence[Any] = (), settings: Optional[dict] = None,
+               missing_to: Optional[int] = None, special_to: Optional[int] = None) -> BinningResult:
         """Compute every bin's statistics from scratch on the training data."""
         settings = dict(settings or {})
         x_raw = self.df[variable]
@@ -463,6 +515,49 @@ class BinningEngine:
         missing, special, clean = self._masks(x_raw, dtype, specials)
         te, tne = self.total_events, self.total_non_events
         warnings: List[str] = []
+
+        # ── where Missing / Special rows go ───────────────────────────
+        if dtype == "numerical":
+            cuts = sorted(float(c) for c in cutoffs)
+            n_reg = len(cuts) + 1
+        elif dtype == "categorical":
+            if not cat_groups:
+                raise ValueError(f"No category groups for '{variable}'.")
+            groups_out = [[str(c) for c in g] for g in cat_groups]
+            n_reg = len(groups_out)
+        else:
+            raise ValueError(f"Unknown dtype {dtype!r}")
+        if missing_to is not None:
+            missing_to = int(missing_to)
+            if not 1 <= missing_to <= n_reg:
+                raise ValueError(f"missing_to={missing_to}: '{variable}' has regular groups 1..{n_reg}.")
+        if special_to is not None:
+            special_to = int(special_to)
+            if not specials:
+                raise ValueError(f"'{variable}' has no special codes to merge.")
+            if not (special_to == MISSING_GROUP or 1 <= special_to <= n_reg):
+                raise ValueError(f"special_to={special_to}: use 0 (with Missing) or a group in 1..{n_reg}.")
+        # Final destination of special rows: None (own bin), MISSING_GROUP or a regular group.
+        special_dest = special_to
+        if special_to == MISSING_GROUP and missing_to is not None:
+            special_dest = missing_to
+
+        def extra_for(group: int) -> np.ndarray:
+            m = np.zeros(len(y), dtype=bool)
+            if missing_to == group:
+                m |= missing
+            if specials and special_dest == group:
+                m |= special
+            return m
+
+        def suffix_for(group: int) -> str:
+            parts = []
+            if missing_to == group:
+                parts.append("Missing")
+            if specials and special_dest == group:
+                parts.append("Special")
+            return "".join(f" | {p}" for p in parts)
+
         bins: List[BinStats] = []
 
         def make(label, group, kind, mask, lower=None, upper=None, categories=None):
@@ -480,38 +575,58 @@ class BinningEngine:
                             woe=w, iv_contribution=ivc)
 
         if dtype == "numerical":
-            cuts = sorted(float(c) for c in cutoffs)
             x = np.where(clean, pd.to_numeric(x_raw, errors="coerce").astype("float64").to_numpy(), np.nan)
             idx = np.searchsorted(np.asarray(cuts, dtype=float), x, side="left")  # (lo, hi]
             bounds = [None] + cuts + [None]
-            for i in range(len(cuts) + 1):
+            for i in range(n_reg):
                 lo, hi = bounds[i], bounds[i + 1]
-                bins.append(make(_numeric_label(lo, hi), i + 1, "regular", clean & (idx == i),
-                                 lower=lo, upper=hi))
+                g = i + 1
+                bins.append(make(_numeric_label(lo, hi) + suffix_for(g), g, "regular",
+                                 (clean & (idx == i)) | extra_for(g), lower=lo, upper=hi))
             groups_out, cuts_out = None, cuts
-        elif dtype == "categorical":
-            if not cat_groups:
-                raise ValueError(f"No category groups for '{variable}'.")
+        else:
             cats = series_to_category_str(x_raw).to_numpy()
-            groups_out = [[str(c) for c in g] for g in cat_groups]
-            for i, g in enumerate(groups_out):
-                mask = clean & np.isin(cats, g)
-                bins.append(make(" | ".join(g), i + 1, "regular", mask, categories=list(g)))
-            covered = clean & np.isin(cats, [c for g in groups_out for c in g])
+            for i, grp in enumerate(groups_out):
+                g = i + 1
+                mask = (clean & np.isin(cats, grp)) | extra_for(g)
+                bins.append(make(" | ".join(grp) + suffix_for(g), g, "regular", mask, categories=list(grp)))
+            covered = clean & np.isin(cats, [c for grp in groups_out for c in grp])
             n_unc = int((clean & ~covered).sum())
             if n_unc:
                 warnings.append(f"{n_unc} training rows have categories outside every group; "
                                 "they will score as Missing/Unknown.")
             cuts_out = []
-        else:
-            raise ValueError(f"Unknown dtype {dtype!r}")
 
+        def alias(kind: str, own_group: int, dest: int) -> BinStats:
+            """A merged Missing/Special entry: no rows of its own, scored as ``dest``."""
+            t = next(b for b in bins if b.group == dest)
+            return BinStats(label=t.label, group=t.group, kind=kind, lower=None, upper=None,
+                            categories=None, count=0, event_count=0, non_event_count=0,
+                            event_rate=t.event_rate, woe=t.woe, iv_contribution=0.0,
+                            merged_into=dest)
+
+        # Missing bin (own, or alias of the regular group it was merged into).
+        if missing_to is None:
+            miss_mask = missing | (special if specials and special_dest == MISSING_GROUP else False)
+            miss_label = "Missing | Special" if specials and special_dest == MISSING_GROUP else "Missing"
+            missing_bin = make(miss_label, MISSING_GROUP, "missing", miss_mask)
+            if missing.sum() == 0:
+                warnings.append("No missing values in training data: missing values at scoring "
+                                "time get WOE 0 (neutral).")
+        else:
+            missing_bin = None
         if specials:
-            bins.append(make("Special", SPECIAL_GROUP, "special", special))
-        bins.append(make("Missing", MISSING_GROUP, "missing", missing))
-        if missing.sum() == 0:
-            warnings.append("No missing values in training data: missing values at scoring "
-                            "time get WOE 0 (neutral).")
+            if special_dest is None:
+                bins.append(make("Special", SPECIAL_GROUP, "special", special))
+            elif special_dest == MISSING_GROUP:
+                bins.append(BinStats(label=missing_bin.label, group=MISSING_GROUP, kind="special",
+                                     lower=None, upper=None, categories=None, count=0,
+                                     event_count=0, non_event_count=0,
+                                     event_rate=missing_bin.event_rate, woe=missing_bin.woe,
+                                     iv_contribution=0.0, merged_into=MISSING_GROUP))
+            else:
+                bins.append(alias("special", SPECIAL_GROUP, special_dest))
+        bins.append(missing_bin if missing_bin is not None else alias("missing", MISSING_GROUP, missing_to))
 
         min_share = float(settings.get("min_bin_size") or 0.0)
         n_total = len(y)
@@ -543,7 +658,20 @@ class BinningEngine:
             special_codes=_json_safe_list(specials), iv=iv, gini=gini_from_auc(auc), ks=ks,
             is_monotonic=is_mono, monotonic_direction=direction,
             settings=settings, warnings=warnings,
+            missing_to=missing_to, special_to=special_to if specials else None,
         )
+
+
+def _check_solver_status(variable: str, optb, settings: Dict[str, Any]) -> None:
+    """optbinning does not raise when the constraints cannot be met: it returns
+    no splits, which would look like a legitimate one-bin variable with a small
+    IV. Fail loudly instead."""
+    status = str(getattr(optb, "status", "OPTIMAL"))
+    if status not in ("OPTIMAL", "FEASIBLE"):
+        raise ValueError(
+            f"No binning of '{variable}' satisfies the constraints (solver status {status}). "
+            f"Relax min_bin_size={settings.get('min_bin_size')}, "
+            f"min_bin_n_event={settings.get('min_bin_n_event')} or max_bins={settings.get('max_bins')}.")
 
 
 def _fmt(v: float) -> str:

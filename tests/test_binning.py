@@ -150,3 +150,15 @@ def test_iv_summary_sorted_and_complete(fitted_engine):
     s = fitted_engine.get_iv_summary()
     assert list(s["IV"]) == sorted(s["IV"], reverse=True)
     assert set(s["Variable"]) == set(fitted_engine.variable_types())  # ID and date are excluded
+
+
+def test_infeasible_constraints_raise_instead_of_returning_one_bin(demo_df):
+    """optbinning returns zero splits when constraints can't be met; that must
+    not pass as a real (weak) variable."""
+    eng = BinningEngine(demo_df, "DEFAULT_12M")
+    with pytest.raises(ValueError, match="INFEASIBLE"):
+        eng.fit("DEBT_TO_INCOME", min_bin_n_event=10**6)
+    with pytest.raises(ValueError, match="INFEASIBLE"):
+        eng.fit("EMPLOYMENT_TYPE", min_bin_n_event=10**6)
+    eng.fit_all(variables=["DEBT_TO_INCOME", "AGE"], min_bin_n_event=10**6)
+    assert set(eng.fit_errors) == {"DEBT_TO_INCOME", "AGE"}
