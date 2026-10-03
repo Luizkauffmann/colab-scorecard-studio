@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scorecard-studio"
-version = "0.1.0"
+version = "0.4.0"
 description = "Optimal binning, WOE and scorecard engine for binary-target models (credit PD, fraud, AML, Kaggle), built for Google Colab."
 readme = "README.md"
 license = { text = "Apache-2.0" }

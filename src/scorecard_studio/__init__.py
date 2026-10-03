@@ -3,7 +3,7 @@ scorecard_studio - optimal binning, WOE and scorecard engine for
 binary-target models, designed to run in Google Colab.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.4.0"
 
 from .artifacts import ScoringArtifact, ScoringBundle  # noqa: E402
 from .binning import (  # noqa: E402
