@@ -34,7 +34,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 # The default demo dataset ships with the package, so the template runs
 # without a Kaggle account.
-scorecard_studio = ["data/*.csv.gz", "app/static/*"]
+scorecard_studio = ["data/*.csv.gz", "app/static/*", "align/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

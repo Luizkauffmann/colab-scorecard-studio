@@ -41,7 +41,10 @@ def test_notebook_runs_end_to_end(tmp_path):
               "03_screening/screening_report.html", "04_binning/loan_status/binning_config.json",
               "04_binning/loan_status/model_dataset.parquet", "04_binning/loan_status/bundle.json",
               "05_model/coefficients.csv", "06_scorecard/scorecard.json",
-              "06_scorecard/scorecard_table.csv", "07_rescore/rescored.csv"]:
+              "06_scorecard/scorecard_table.csv", "07_rescore/rescored.csv",
+              "08_alignment/alignment_state.json", "08_alignment/final_scored.parquet",
+              "08_alignment/final_scorecard.json", "08_alignment/scorer.py",
+              "08_alignment/scorer_standard.sql"]:
         assert (root / f).exists(), f
     shortlist = json.loads((root / "03_screening/shortlist.json").read_text())
     assert "loan_grade" in shortlist["dropped"] and shortlist["selected"]
