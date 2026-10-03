@@ -41,14 +41,21 @@ Every section writes its output to a versioned folder on your Google Drive (`sco
 md("""
 ## 0. Setup
 
-Installs the `scorecard_studio` engine from GitHub and mounts Google Drive for the outputs. Colab starts from a fresh machine every session, so this cell always runs first. It takes about a minute (optbinning brings in Google OR-Tools, the solver behind optimal binning).
+Installs the `scorecard_studio` engine from GitHub and mounts Google Drive for the outputs. Colab starts from a fresh machine every session, so this cell always runs first. If you re-run the notebook in the same session after an update, the cell asks you to restart the session first: Python keeps the version it already loaded in memory. It takes about a minute (optbinning brings in Google OR-Tools, the solver behind optimal binning).
 """)
 code(f"""
 STUDIO_REF = "{REF}"   # git branch or tag of the engine to install
 
 import sys
+if "scorecard_studio" in sys.modules:
+    # An older version is already loaded in this session; installing can't replace it in memory.
+    raise RuntimeError("scorecard_studio is already loaded in this session. "
+                       "Use Runtime > Restart session (or Disconnect and delete runtime), then Run all.")
 if "google.colab" in sys.modules:
-    !pip -q install "git+https://github.com/Luizkauffmann/colab-scorecard-studio@{{STUDIO_REF}}"
+    URL = f"git+https://github.com/Luizkauffmann/colab-scorecard-studio@{{STUDIO_REF}}"
+    !pip -q install "$URL"
+    # Always take the latest code of STUDIO_REF, even if a copy with the same version is installed.
+    !pip -q install --no-deps --force-reinstall "$URL"
 """)
 code("""
 import os, warnings
